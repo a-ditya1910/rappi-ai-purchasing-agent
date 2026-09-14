@@ -56,7 +56,13 @@ public class PurchaseOrder {
      * they load and save together. Everything else holds a plain id and gets looked
      * up through its own repository, which keeps open-in-view=false honest.
      */
+    /*
+     * nullable=false is load bearing. Without it hibernate inserts the line with
+     * a null po_id and then issues a second update to fill it in, which the not
+     * null constraint rejects. Marking it non null makes the fk part of the
+     * insert.
+     */
     @OneToMany(cascade = CascadeType.ALL, orphanRemoval = true)
-    @JoinColumn(name = "po_id")
+    @JoinColumn(name = "po_id", nullable = false)
     private List<PoLine> lines = new ArrayList<>();
 }
