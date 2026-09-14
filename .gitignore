@@ -1,0 +1,15 @@
+.env
+target/
+*.class
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+node_modules/
+dist/
+.idea/
+.vscode/
+*.iml
+.DS_Store
+evals/.cache/
+docs/

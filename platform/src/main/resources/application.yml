@@ -1,0 +1,35 @@
+spring:
+  application.name: buyer-platform
+  datasource:
+    url: ${MYSQL_URL:jdbc:mysql://localhost:3306/buyer}
+    username: ${MYSQL_USER:buyer}
+    password: ${MYSQL_PASSWORD:buyer}
+  jpa:
+    hibernate.ddl-auto: validate
+    open-in-view: false
+    properties.hibernate.jdbc.time_zone: UTC
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  data.redis:
+    host: ${REDIS_HOST:localhost}
+    port: ${REDIS_PORT:6379}
+
+management:
+  endpoints.web.exposure.include: health,info
+  endpoint.health.show-details: always
+
+app:
+  sim-date: ${SIM_DATE:2026-03-10}
+  agent-base-url: ${AGENT_BASE_URL:http://localhost:8100}
+  run-lock-ttl-seconds: 300
+  planning:
+    service-level: { A: 0.98, B: 0.95, C: 0.90 }
+    max-cover-days: { standard: 30, slow-mover: 45 }
+    perishable-overbuy: { warn: 1.25, block: 1.50 }
+    price-variance: { approval: 0.10, block: 0.25 }
+    value-threshold: 1000.00
+    qty-delta-approval: 0.50
+    supplier-weights: { price: 0.35, lead-time: 0.35, reliability: 0.20, moq: 0.10 }
+
+logging.level.com.rappi.buyer: DEBUG
