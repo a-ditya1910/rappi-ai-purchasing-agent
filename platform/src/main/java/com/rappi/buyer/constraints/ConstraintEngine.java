@@ -266,6 +266,16 @@ public class ConstraintEngine {
         }
     }
 
+    /**
+     * Warns, does not block. The planner has already netted open POs off the
+     * position, so the proposed quantity is the residual need - blocking here
+     * would stop the agent topping up a partly covered sku, which is most of
+     * what it exists to do.
+     *
+     * Genuine duplicates are stopped by the unique idempotency key, in the same
+     * transaction as the insert. A validation check could not make that promise
+     * anyway: anything can happen between the check and the write.
+     */
     private void duplicatePo(List<Check> out, Proposal p, ReorderPlan plan) {
         LocalDate window = LocalDate.now(clock).plusDays(plan.protectionPeriodDays());
         List<PurchaseOrder> open = purchaseOrders.findOpenForSku(p.nodeId(), p.sku());
@@ -275,9 +285,14 @@ public class ConstraintEngine {
 
         if (clash.isPresent()) {
             PurchaseOrder po = clash.get();
-            out.add(block("DUPLICATE_PO", ("%s already covers this sku, arriving %s inside the %d day "
-                    + "window. Amend it rather than raising another.")
-                    .formatted(po.getId(), po.getExpectedDelivery(), plan.protectionPeriodDays())));
+            int covered = po.getLines().stream()
+                    .filter(l -> l.getSku().equals(p.sku()))
+                    .mapToInt(l -> l.getQtyConfirmed() != null ? l.getQtyConfirmed() : l.getQtyOrdered())
+                    .sum();
+            out.add(warn("DUPLICATE_PO", ("%s already covers %d units of this sku, arriving %s. The %d "
+                    + "proposed is the residual need after counting it. Consider amending that PO "
+                    + "rather than raising another.")
+                    .formatted(po.getId(), covered, po.getExpectedDelivery(), p.qty())));
         } else {
             out.add(pass("DUPLICATE_PO", "no open PO for this sku in the protection window"));
         }

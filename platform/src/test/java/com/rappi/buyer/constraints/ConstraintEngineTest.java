@@ -5,6 +5,7 @@ import com.rappi.buyer.constraints.ValidationReport.Status;
 import com.rappi.buyer.constraints.ValidationReport.Verdict;
 import com.rappi.buyer.domain.Budget;
 import com.rappi.buyer.domain.Node;
+import com.rappi.buyer.domain.PoLine;
 import com.rappi.buyer.domain.PoStatus;
 import com.rappi.buyer.domain.Product;
 import com.rappi.buyer.domain.PurchaseOrder;
@@ -157,18 +158,27 @@ class ConstraintEngineTest {
     }
 
     @Test
-    @DisplayName("an open PO covering the same window blocks a duplicate")
-    void duplicatePoBlocks() {
+    @DisplayName("an open PO in the window warns but must not block the top up")
+    void duplicatePoWarns() {
+        PoLine line = new PoLine();
+        line.setSku(SKU);
+        line.setQtyOrdered(400);
+        line.setUnitPrice(new BigDecimal("0.95"));
+
         PurchaseOrder open = new PurchaseOrder();
         open.setId("PO-0007");
         open.setExpectedDelivery(TODAY.plusDays(3));
         open.setStatus(PoStatus.CONFIRMED);
+        open.setLines(List.of(line));
         when(purchaseOrders.findOpenForSku(anyString(), anyString())).thenReturn(List.of(open));
 
         ValidationReport r = engine.validate(proposal(204, "0.95", null), plan(680, "57.5", 12, 5));
 
-        assertThat(status(r, "DUPLICATE_PO")).isEqualTo(Status.BLOCK);
-        assertThat(r.blocking()).anyMatch(b -> b.contains("PO-0007"));
+        // the planner already netted those 400 off the position, so 204 is the
+        // residual need. blocking it would stop the agent ever topping up.
+        assertThat(status(r, "DUPLICATE_PO")).isEqualTo(Status.WARN);
+        assertThat(r.blocking()).isEmpty();
+        assertThat(detail(r, "DUPLICATE_PO")).contains("PO-0007").contains("residual need");
     }
 
     @Test
@@ -252,8 +262,15 @@ class ConstraintEngineTest {
     // ---- fixtures ----------------------------------------------------------
 
     Status status(ValidationReport r, String id) {
+        return check(r, id).status();
+    }
+
+    String detail(ValidationReport r, String id) {
+        return check(r, id).detail();
+    }
+
+    ValidationReport.Check check(ValidationReport r, String id) {
         return r.checks().stream().filter(c -> c.id().equals(id)).findFirst()
-                .map(ValidationReport.Check::status)
                 .orElseThrow(() -> new AssertionError("no check called " + id));
     }
 
