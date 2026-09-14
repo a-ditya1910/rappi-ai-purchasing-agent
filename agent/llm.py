@@ -108,20 +108,52 @@ def _retryable(e):
 def check_model_available(model=None):
     """Fail in two seconds with a clear message rather than mysteriously at run 7.
 
-    Which flash models a given account can use for free is not something the
-    docs pin down, so ask the api instead of assuming.
+    This makes a real one token call rather than looking the model up in the
+    models list. Being listed is not the same as being usable: gemini-2.5-flash
+    is returned by /models on a new key and then 404s on generateContent with
+    "no longer available to new users". Checking the list would have passed and
+    the first real run would have failed.
     """
     cfg.require_key()
     want = model or cfg.model
     import httpx
 
-    r = httpx.get(
-        "https://generativelanguage.googleapis.com/v1beta/models",
+    r = httpx.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{want}:generateContent",
         params={"key": cfg.gemini_key},
-        timeout=15,
+        json={"contents": [{"parts": [{"text": "ok"}]}]},
+        timeout=30,
     )
-    r.raise_for_status()
-    names = [m["name"].split("/")[-1] for m in r.json().get("models", [])]
-    if want in names:
-        return True, want, names
-    return False, want, names
+    if r.status_code == 200:
+        return True, want, []
+
+    detail = r.json().get("error", {}).get("message", r.text[:200])
+    return False, want, [detail] + _usable_alternatives()
+
+
+def _usable_alternatives():
+    """Only models we have actually called successfully get suggested."""
+    import httpx
+
+    try:
+        r = httpx.get("https://generativelanguage.googleapis.com/v1beta/models",
+                      params={"key": cfg.gemini_key}, timeout=15)
+        listed = [m["name"].split("/")[-1] for m in r.json().get("models", [])
+                  if "generateContent" in m.get("supportedGenerationMethods", [])
+                  and "flash" in m["name"] and "image" not in m["name"]
+                  and "tts" not in m["name"]]
+    except Exception:
+        return []
+
+    works = []
+    for m in listed[:8]:
+        try:
+            r = httpx.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent",
+                params={"key": cfg.gemini_key},
+                json={"contents": [{"parts": [{"text": "ok"}]}]}, timeout=20)
+            if r.status_code == 200:
+                works.append(m)
+        except Exception:
+            pass
+    return works

@@ -11,8 +11,8 @@ class Config:
     gemini_key = os.getenv("GEMINI_API_KEY", "")
     # never hardcoded - which flash models are free is account specific and the
     # lineup moves. check your ai studio dashboard.
-    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-    judge_model = os.getenv("GEMINI_JUDGE_MODEL", "gemini-2.5-flash-lite")
+    model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+    judge_model = os.getenv("GEMINI_JUDGE_MODEL", "gemini-3.1-flash-lite")
     rpm_limit = int(os.getenv("GEMINI_RPM_LIMIT", "14"))
 
     platform_url = os.getenv("PLATFORM_BASE_URL", "http://localhost:8080")
