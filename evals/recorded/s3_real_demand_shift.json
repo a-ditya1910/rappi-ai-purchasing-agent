@@ -1,0 +1,85 @@
+{
+  "runId": "fee698b3-09f9-47b4-853d-672f41b4784a",
+  "decision": "INVESTIGATE",
+  "qty": 240,
+  "reasoning": "The current demand forecast is stale and significantly underestimates the actual sales velocity observed over the last 14 days (102.2 units/day vs 44.2 units/day). Relying on the planner's calculation, which uses the lower forecast, would lead to a stockout. Given the high recent sales, I need to re-evaluate the target inventory level based on the actual sales trend before placing an order, even though the MOQ is 240. I am choosing INVESTIGATE to highlight the discrepancy between the forecast and actuals before committing to an order quantity.",
+  "keyFactors": [
+    "Recent actual sales (102.2/day) are more than double the forecast mean (44.2/day).",
+    "The demand forecast is stale (136 hours old).",
+    "The current position (540) will be depleted in approximately 5-6 days if recent sales trends continue (102.2/day).",
+    "The lead time is 6 days, meaning an order placed now would arrive just as current stock is exhausted."
+  ],
+  "assumptions": [
+    "The demand forecast (mean 44.2/day) is significantly lower than the recent actual sales (mean 102.2/day). I am prioritizing the recent actual sales data as the forecast is stale and underestimating current demand.",
+    "The planner's calculation used a mean of 44.3/day, which is inconsistent with the provided forecast mean of 44.2/day and ignores the recent actuals."
+  ],
+  "confidence": 0.8,
+  "validation": {
+    "verdict": "NOT_APPLICABLE",
+    "riskTier": "T1",
+    "detail": "no purchase proposed"
+  },
+  "execution": {
+    "outcome": "NO_ACTION"
+  },
+  "analysis": {
+    "sku": "SKU-CHIPS-150G",
+    "nodeId": "NODE-BOG-01",
+    "supplierId": "SUP-SNACKCO",
+    "onHand": 260,
+    "reserved": 20,
+    "inTransit": 300,
+    "inventoryPosition": 540,
+    "leadTimeDays": 6,
+    "reviewPeriodDays": 7,
+    "protectionPeriodDays": 13,
+    "expectedDemand": 576.24,
+    "meanDailyDemand": 44.33,
+    "safetyStock": 107,
+    "serviceLevel": 0.95,
+    "z": 1.65,
+    "targetPosition": 684,
+    "rawNeed": 144,
+    "afterMoq": 240,
+    "afterCasePack": 240,
+    "maxAffordable": 4128,
+    "maxStorable": 7488,
+    "recommendedQty": 240,
+    "daysOfCoverNow": 12.2,
+    "daysOfCoverAfter": 17.6,
+    "unitPrice": 0.62,
+    "estimatedCost": 148.8,
+    "explanationSteps": [
+      "Protection period = 6 lead time + 7 review period = 13 days",
+      "Position = 260 on hand - 20 reserved + 300 arriving within 13 days = 540",
+      "Expected demand over 13 days = 576.2 units (mean 44.3/day)",
+      "Safety stock = 1.65 z x sqrt(13 x 10.0^2 + (44.3 x 1.2)^2) = 107 units",
+      "Target position = 684, current 540, so raw need = 144",
+      "Need 144 is below the 240 minimum order quantity"
+    ],
+    "warnings": [
+      "forecast was generated 136 hours ago"
+    ]
+  },
+  "toolsCalled": [
+    "/tools/product",
+    "/tools/inventory-position",
+    "/tools/demand-forecast",
+    "/tools/sales-actuals",
+    "/tools/open-pos",
+    "/tools/suppliers",
+    "/tools/storage",
+    "/tools/calculate-reorder",
+    "/tools/record-decision"
+  ],
+  "gatherTurns": 1,
+  "llmCalls": 2,
+  "tokensIn": 2805,
+  "tokensOut": 604,
+  "durationMs": 5132,
+  "errors": [],
+  "_elapsedSec": 7.2,
+  "_anomalyVerdict": "REAL",
+  "_recordedAt": "2026-09-14T20:37:35+00:00",
+  "_model": "gemini-3.1-flash-lite"
+}

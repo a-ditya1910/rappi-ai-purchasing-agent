@@ -1,0 +1,83 @@
+[
+  {
+    "id": "s1_recommendation_is_four_times_too_high",
+    "why": "The flagship case. 800 units recommended; an open PO already covers most of the demand and MOQ forces a small over-buy on a 12 day product. Accepting is wrong and rejecting is also wrong.",
+    "input": {"scenario": "S1_REVIEW", "sku": "SKU-MILK-1L", "node_id": "NODE-BOG-01",
+              "supplier_id": "SUP-LACTEO", "recommended_qty": 800},
+    "expect": {
+      "decision": ["MODIFY", "ESCALATE"],
+      "qty_range": [192, 240],
+      "required_tools": ["/tools/inventory-position", "/tools/demand-forecast",
+                         "/tools/open-pos", "/tools/suppliers", "/tools/budget",
+                         "/tools/storage", "/tools/calculate-reorder"],
+      "risk_tier": "T3",
+      "constraint_verdict_not": ["BLOCKED"],
+      "must_mention": [["minimum order", "moq"], ["800"]],
+      "max_gather_turns": 4
+    }
+  },
+  {
+    "id": "s1_recommendation_is_already_right",
+    "why": "The agent must be able to agree. A system that always finds fault is as useless as one that never does.",
+    "input": {"scenario": "S1_REVIEW", "sku": "SKU-MILK-1L", "node_id": "NODE-BOG-01",
+              "supplier_id": "SUP-LACTEO", "recommended_qty": 204},
+    "expect": {
+      "decision": ["ACCEPT", "MODIFY"],
+      "qty_range": [192, 240],
+      "required_tools": ["/tools/calculate-reorder"],
+      "constraint_verdict_not": ["BLOCKED"],
+      "max_gather_turns": 4
+    }
+  },
+  {
+    "id": "s1_absurd_recommendation",
+    "why": "50000 units of milk. The interesting failure is a model that rationalises an implausible number down to something defensible instead of flagging it.",
+    "input": {"scenario": "S1_REVIEW", "sku": "SKU-MILK-1L", "node_id": "NODE-BOG-01",
+              "supplier_id": "SUP-LACTEO", "recommended_qty": 50000},
+    "expect": {
+      "decision": ["MODIFY", "INVESTIGATE", "ESCALATE", "REJECT"],
+      "qty_range": [0, 600],
+      "forbidden_outcome": ["VERIFIED"],
+      "constraint_verdict_not": ["BLOCKED"],
+      "note": "whatever it decides, it must not have ordered anything like 50000"
+    }
+  },
+  {
+    "id": "s3_real_demand_shift",
+    "why": "Chips actually moved: 14 straight days at 2.3x forecast, no promotion. The detector must say REAL. INVESTIGATE is an accepted decision here and the first live run explained why: the forecast is 136 hours stale and says 44/day while actuals run 102/day, so the planner's quantity is computed from a number the agent has good reason to distrust. Ordering it would under-buy. Acting properly needs a forecast override tool, which does not exist yet - see the known gaps in the README.",
+    "input": {"scenario": "S3_DEMAND", "sku": "SKU-CHIPS-150G", "node_id": "NODE-BOG-01",
+              "supplier_id": "SUP-SNACKCO"},
+    "expect": {
+      "decision": ["MODIFY", "ACCEPT", "ESCALATE", "INVESTIGATE"],
+      "required_tools": ["/tools/sales-actuals", "/tools/demand-forecast"],
+      "anomaly_verdict": "REAL",
+      "must_mention": [["stale", "forecast"], ["102", "actual"]],
+      "constraint_verdict_not": ["BLOCKED"]
+    }
+  },
+  {
+    "id": "s3_fake_demand_spike",
+    "why": "The best case in the suite. Soda looks identical to chips on a chart, but it is a promotion plus one 1070 unit b2b order. The right answer is to leave the plan alone.",
+    "input": {"scenario": "S3_DEMAND", "sku": "SKU-SODA-2L", "node_id": "NODE-BOG-01",
+              "supplier_id": "SUP-BEBIDAS"},
+    "expect": {
+      "decision": ["INVESTIGATE", "REJECT", "ACCEPT", "MODIFY"],
+      "required_tools": ["/tools/sales-actuals"],
+      "anomaly_verdict": "EXPLAINED",
+      "qty_range": [0, 120],
+      "note": "must not scale up for a spike that is already explained"
+    }
+  },
+  {
+    "id": "s4_no_legal_order_exists",
+    "why": "Rice needs 713 units, the budget affords 140, and the only supplier has a minimum of 1000. There is no legal purchase, so the answer is a costed brief for a human, not an order.",
+    "input": {"scenario": "S1_REVIEW", "sku": "SKU-RICE-5KG", "node_id": "NODE-BOG-01",
+              "supplier_id": "SUP-ARROZMX"},
+    "expect": {
+      "decision": ["ESCALATE", "INVESTIGATE", "REJECT"],
+      "qty_range": [0, 0],
+      "expect_no_purchase": true,
+      "note": "ordering anything here would be rejected by the supplier or blow the budget"
+    }
+  }
+]
