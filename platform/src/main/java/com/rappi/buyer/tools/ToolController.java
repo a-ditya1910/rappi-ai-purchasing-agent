@@ -11,8 +11,10 @@ import com.rappi.buyer.domain.PurchaseOrder;
 import com.rappi.buyer.domain.SalesActual;
 import com.rappi.buyer.domain.Supplier;
 import com.rappi.buyer.domain.SupplierProduct;
+import com.rappi.buyer.planner.DemandAnomalyDetector;
 import com.rappi.buyer.planner.ReorderPlan;
 import com.rappi.buyer.planner.ReorderPlanner;
+import com.rappi.buyer.policy.PolicyRetriever;
 import com.rappi.buyer.repo.BudgetRepo;
 import com.rappi.buyer.repo.ForecastRepo;
 import com.rappi.buyer.repo.InventoryRepo;
@@ -66,13 +68,16 @@ public class ToolController {
     private final PurchaseOrderRepo purchaseOrders;
     private final ReorderPlanner planner;
     private final ConstraintEngine constraints;
+    private final DemandAnomalyDetector anomalies;
+    private final PolicyRetriever policyRetriever;
     private final Clock clock;
 
     public ToolController(ProductRepo products, NodeRepo nodes, SupplierRepo suppliers,
                           SupplierProductRepo supplierProducts, InventoryRepo inventory,
                           ForecastRepo forecasts, SalesRepo sales, BudgetRepo budgets,
                           PurchaseOrderRepo purchaseOrders, ReorderPlanner planner,
-                          ConstraintEngine constraints, Clock clock) {
+                          ConstraintEngine constraints, DemandAnomalyDetector anomalies,
+                          PolicyRetriever policyRetriever, Clock clock) {
         this.products = products;
         this.nodes = nodes;
         this.suppliers = suppliers;
@@ -84,6 +89,8 @@ public class ToolController {
         this.purchaseOrders = purchaseOrders;
         this.planner = planner;
         this.constraints = constraints;
+        this.anomalies = anomalies;
+        this.policyRetriever = policyRetriever;
         this.clock = clock;
     }
 
@@ -181,17 +188,62 @@ public class ToolController {
         return ToolResponse.ok(out);
     }
 
+    /**
+     * Summarised, not sixty raw rows.
+     *
+     * The first live run got this wrong: the agent asked for actuals, the client
+     * truncated the json at 800 characters, and because the rows are oldest
+     * first the recent spike - the only part that mattered - was the part that
+     * got cut. Handing back a shape removes the chance to miss it.
+     */
     @GetMapping("/sales-actuals")
-    public ToolResponse<List<Map<String, Object>>> salesActuals(@RequestParam String sku,
-                                                                @RequestParam String nodeId,
-                                                                @RequestParam(defaultValue = "60") int lookbackDays) {
+    public ToolResponse<Map<String, Object>> salesActuals(@RequestParam String sku,
+                                                          @RequestParam String nodeId,
+                                                          @RequestParam(defaultValue = "60") int lookbackDays) {
         LocalDate today = LocalDate.now(clock);
-        return ToolResponse.ok(sales
-                .findByNodeIdAndSkuAndSaleDateBetweenOrderBySaleDate(
-                        nodeId, sku, today.minusDays(lookbackDays), today.minusDays(1))
-                .stream()
-                .map(s -> Map.<String, Object>of("date", s.getSaleDate(), "unitsSold", s.getUnitsSold()))
+        List<SalesActual> rows = sales.findByNodeIdAndSkuAndSaleDateBetweenOrderBySaleDate(
+                nodeId, sku, today.minusDays(lookbackDays), today.minusDays(1));
+        if (rows.isEmpty()) {
+            throw new NotFound("NO_SALES", "no sales history for " + sku + " at " + nodeId);
+        }
+
+        int n = rows.size();
+        int split = Math.max(0, n - 14);
+        double recent = rows.subList(split, n).stream().mapToInt(SalesActual::getUnitsSold).average().orElse(0);
+        double prior = split == 0 ? recent
+                : rows.subList(0, split).stream().mapToInt(SalesActual::getUnitsSold).average().orElse(0);
+        SalesActual peak = rows.stream().max((a, b) -> a.getUnitsSold() - b.getUnitsSold()).orElseThrow();
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("sku", sku);
+        out.put("nodeId", nodeId);
+        out.put("days", n);
+        out.put("recentMeanLast14", round1(recent));
+        out.put("priorMean", round1(prior));
+        out.put("ratioRecentToPrior", prior == 0 ? null : round1(recent / prior));
+        out.put("peakUnits", peak.getUnitsSold());
+        out.put("peakDate", peak.getSaleDate());
+        out.put("last14", rows.subList(split, n).stream()
+                .map(r -> Map.of("date", r.getSaleDate(), "unitsSold", r.getUnitsSold()))
                 .toList());
+        return ToolResponse.ok(out);
+    }
+
+    @GetMapping("/demand-anomaly")
+    public ToolResponse<DemandAnomalyDetector.Anomaly> demandAnomaly(
+            @RequestParam String sku, @RequestParam String nodeId,
+            @RequestParam(defaultValue = "60") int lookbackDays) {
+        return ToolResponse.ok(anomalies.detect(sku, nodeId, lookbackDays));
+    }
+
+    @GetMapping("/policy-search")
+    public ToolResponse<List<PolicyRetriever.Hit>> policySearch(@RequestParam String query,
+                                                                @RequestParam(defaultValue = "3") int k) {
+        return ToolResponse.ok(policyRetriever.search(query, k));
+    }
+
+    private static double round1(double v) {
+        return Math.round(v * 10.0) / 10.0;
     }
 
     @GetMapping("/open-pos")
