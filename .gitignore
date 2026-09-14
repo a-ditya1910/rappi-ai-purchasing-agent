@@ -13,3 +13,4 @@ dist/
 .DS_Store
 evals/.cache/
 docs/
+.pytest_cache/

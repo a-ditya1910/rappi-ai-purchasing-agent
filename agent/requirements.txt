@@ -1,0 +1,11 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+httpx==0.28.1
+redis==5.2.1
+python-dotenv==1.0.1
+# 4.x moved onto the supported google-genai sdk. 2.x still pulls the deprecated
+# google.generativeai package and warns loudly on import.
+langchain-google-genai==4.4.0
+langgraph==1.2.11
+langchain-core==1.6.3
+pytest==8.3.4
