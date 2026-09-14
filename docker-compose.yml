@@ -29,5 +29,37 @@ services:
       timeout: 3s
       retries: 10
 
+  platform:
+    build: ./platform
+    container_name: buyer-platform
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    environment:
+      # inside the compose network the services are reachable by name, and
+      # mysql is on 3306 regardless of which host port we mapped
+      MYSQL_URL: jdbc:mysql://mysql:3306/${MYSQL_DATABASE:-buyer}
+      MYSQL_USER: ${MYSQL_USER:-buyer}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-buyer}
+      REDIS_HOST: redis
+      AGENT_BASE_URL: http://agent:8100
+      SIM_DATE: ${SIM_DATE:-2026-03-10}
+    ports:
+      - "8080:8080"
+
+  agent:
+    build: ./agent
+    container_name: buyer-agent
+    depends_on:
+      - platform
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.1-flash-lite}
+      GEMINI_RPM_LIMIT: ${GEMINI_RPM_LIMIT:-14}
+      PLATFORM_BASE_URL: http://platform:8080
+      REDIS_HOST: redis
+    ports:
+      - "8100:8100"
+
 volumes:
   mysql-data:
