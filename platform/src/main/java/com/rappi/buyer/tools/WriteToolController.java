@@ -1,6 +1,11 @@
 package com.rappi.buyer.tools;
 
+import com.rappi.buyer.api.ApprovalController;
 import com.rappi.buyer.constraints.Proposal;
+import com.rappi.buyer.domain.AgentRun;
+import com.rappi.buyer.domain.Approval;
+import com.rappi.buyer.repo.AgentRunRepo;
+import com.rappi.buyer.repo.ApprovalRepo;
 import com.rappi.buyer.tools.PurchaseOrderService.WriteResult;
 import com.rappi.buyer.verify.VerificationReport;
 import com.rappi.buyer.verify.Verifier;
@@ -17,7 +22,11 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import java.math.BigDecimal;
+import java.time.Clock;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -33,10 +42,84 @@ public class WriteToolController {
 
     private final PurchaseOrderService orders;
     private final Verifier verifier;
+    private final ApprovalRepo approvals;
+    private final AgentRunRepo runs;
+    private final ObjectMapper json;
+    private final Clock clock;
 
-    public WriteToolController(PurchaseOrderService orders, Verifier verifier) {
+    public WriteToolController(PurchaseOrderService orders, Verifier verifier,
+                               ApprovalRepo approvals, AgentRunRepo runs,
+                               ObjectMapper json, Clock clock) {
         this.orders = orders;
         this.verifier = verifier;
+        this.approvals = approvals;
+        this.runs = runs;
+        this.json = json;
+        this.clock = clock;
+    }
+
+    public record RequestApproval(
+            @NotBlank String reason,
+            @NotBlank String riskTier,
+            Map<String, Object> proposedAction) {}
+
+    public record RecordDecision(
+            @NotBlank String decision,
+            Integer finalQty,
+            String explanation,
+            Object validationReport) {}
+
+    /**
+     * Park a decision the agent is not allowed to make. The action is stored
+     * whole so approving it later executes exactly what was queued, rather than
+     * asking the model to think again and possibly land somewhere else.
+     */
+    @PostMapping("/request-approval")
+    public ToolResponse<Map<String, Object>> requestApproval(
+            @Valid @RequestBody RequestApproval req,
+            @RequestHeader("X-Run-Id") String runId) throws Exception {
+
+        Approval a = new Approval();
+        a.setId(ApprovalController.newId());
+        a.setRunId(runId);
+        a.setReason(req.reason());
+        a.setRiskTier(req.riskTier());
+        a.setProposedAction(json.writeValueAsString(
+                req.proposedAction() == null ? Map.of() : req.proposedAction()));
+        a.setStatus(Approval.Status.PENDING);
+        a.setCreatedAt(Instant.now(clock));
+        approvals.save(a);
+
+        runs.findById(runId).ifPresent(r -> {
+            r.setStatus(AgentRun.Status.NEEDS_APPROVAL);
+            runs.save(r);
+        });
+
+        return ToolResponse.ok(Map.of(
+                "approvalId", a.getId(),
+                "status", a.getStatus().name(),
+                "message", "queued for a buyer, nothing has been ordered"));
+    }
+
+    /** Terminal step. A run that never records a decision is a run nobody can audit. */
+    @PostMapping("/record-decision")
+    public ToolResponse<Map<String, Object>> recordDecision(
+            @Valid @RequestBody RecordDecision req,
+            @RequestHeader("X-Run-Id") String runId) throws Exception {
+
+        AgentRun run = runs.findById(runId).orElseThrow(
+                () -> new ToolController.NotFound("NO_RUN", "unknown run " + runId));
+        run.setDecision(AgentRun.Decision.valueOf(req.decision()));
+        run.setFinalQty(req.finalQty());
+        run.setExplanation(req.explanation());
+        if (req.validationReport() != null) {
+            run.setValidationReport(json.writeValueAsString(req.validationReport()));
+        }
+        if (run.getStatus() == AgentRun.Status.RUNNING) {
+            run.setStatus(AgentRun.Status.COMPLETED);
+        }
+        runs.save(run);
+        return ToolResponse.ok(Map.of("ok", true, "runId", runId, "decision", req.decision()));
     }
 
     public record CreatePo(

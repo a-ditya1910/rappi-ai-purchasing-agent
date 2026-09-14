@@ -92,6 +92,41 @@ class Platform:
             "expectedDelivery": expectedDelivery, "recommendedQty": recommendedQty,
         })
 
+    # ---- writes ----------------------------------------------------------
+
+    def create_po(self, sku, nodeId, supplierId, qty, unitPrice, expectedDelivery,
+                  idempotencyKey, recommendedQty=None, reason=None):
+        return self.post("/tools/create-po", {
+            "sku": sku, "nodeId": nodeId, "supplierId": supplierId, "qty": qty,
+            "unitPrice": unitPrice, "expectedDelivery": expectedDelivery,
+            "idempotencyKey": idempotencyKey, "recommendedQty": recommendedQty,
+            "reason": reason,
+        })
+
+    def amend_po(self, poId, newQty, expectedVersion, reason):
+        return self.post("/tools/amend-po", {
+            "poId": poId, "newQty": newQty,
+            "expectedVersion": expectedVersion, "reason": reason})
+
+    def cancel_po(self, poId, expectedVersion, reason):
+        return self.post("/tools/cancel-po", {
+            "poId": poId, "expectedVersion": expectedVersion, "reason": reason})
+
+    def request_approval(self, reason, riskTier, proposedAction):
+        return self.post("/tools/request-approval", {
+            "reason": reason, "riskTier": riskTier, "proposedAction": proposedAction})
+
+    def record_decision(self, decision, finalQty=None, explanation=None, validationReport=None):
+        return self.post("/tools/record-decision", {
+            "decision": decision, "finalQty": finalQty,
+            "explanation": explanation, "validationReport": validationReport})
+
+    def demand_anomaly(self, sku, nodeId, lookbackDays=60):
+        return self.get("/tools/demand-anomaly", sku=sku, nodeId=nodeId, lookbackDays=lookbackDays)
+
+    def policy_search(self, query, k=3):
+        return self.get("/tools/policy-search", query=query, k=k)
+
     # ---- run bookkeeping -------------------------------------------------
 
     def log_step(self, type_, name, payload=None):

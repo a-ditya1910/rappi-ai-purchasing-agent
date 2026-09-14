@@ -27,6 +27,7 @@ import com.rappi.buyer.repo.SupplierRepo;
 
 import jakarta.validation.Valid;
 
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -246,6 +247,7 @@ public class ToolController {
         return Math.round(v * 10.0) / 10.0;
     }
 
+    @Transactional(readOnly = true)
     @GetMapping("/open-pos")
     public ToolResponse<List<Map<String, Object>>> openPos(@RequestParam String sku,
                                                            @RequestParam String nodeId) {
@@ -331,6 +333,7 @@ public class ToolController {
         return ToolResponse.ok(out);
     }
 
+    @Transactional(readOnly = true)
     @GetMapping("/po/{poId}")
     public ToolResponse<Map<String, Object>> po(@PathVariable String poId) {
         PurchaseOrder po = purchaseOrders.findById(poId)

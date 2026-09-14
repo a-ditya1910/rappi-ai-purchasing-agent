@@ -5,6 +5,7 @@ import time
 from fastapi import FastAPI
 from pydantic import BaseModel
 
+import execute as execute_mod
 import graph
 import llm as llm_mod
 from config import cfg
@@ -52,6 +53,53 @@ def health():
             "platform": cfg.platform_url}
 
 
+class ResumeRequest(BaseModel):
+    approval_id: str
+    approved_action: dict
+
+
+@app.post("/resume/{run_id}")
+def resume(run_id: str, req: ResumeRequest):
+    """A buyer approved something the agent was not allowed to do alone.
+
+    This runs the same execute and verify path the agent would have taken by
+    itself. Human approval changes who decided, not how carefully the result
+    gets checked - one code path, so there is only one place for a bug to live.
+    """
+    started = time.time()
+    platform = Platform(run_id)
+    model = llm_mod.Gemini()
+
+    action = req.approved_action or {}
+    if not action.get("sku"):
+        return {"runId": run_id, "error": "the approved action has no sku to act on"}
+
+    plan = (platform.calculate_reorder(
+        action["sku"], action["nodeId"], action["supplierId"]) or {}).get("data") or {}
+
+    platform.log_step("DECISION", "approval",
+                      {"approvalId": req.approval_id, "approvedAction": action})
+
+    result = execute_mod.execute_and_verify(
+        platform, model, run_id, action, plan, action.get("recommendedQty"))
+
+    platform.record_decision(
+        decision="MODIFY", finalQty=action.get("qty"),
+        explanation="Executed after approval %s. Outcome: %s"
+                    % (req.approval_id, result.get("outcome")))
+
+    return {
+        "runId": run_id,
+        "approvalId": req.approval_id,
+        "outcome": result.get("outcome"),
+        "poId": result.get("poId"),
+        "verification": result.get("verification"),
+        "repairs": result.get("repairs"),
+        "llmCalls": model.calls,
+        "durationMs": int((time.time() - started) * 1000),
+    }
+
+
 @app.post("/decide")
 def decide(req: DecideRequest):
     started = time.time()
@@ -80,6 +128,7 @@ def decide(req: DecideRequest):
         "assumptions": proposal.get("assumptions"),
         "confidence": proposal.get("confidence"),
         "validation": validation,
+        "execution": state.get("execution"),
         "analysis": state.get("analysis"),
         "toolsCalled": platform.calls,
         "gatherTurns": state.get("gather_turns"),

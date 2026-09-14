@@ -1,6 +1,6 @@
 """The agent loop.
 
-gather -> analyse -> propose -> preflight
+gather -> analyse -> propose -> preflight -> act
 
 analyse sits deliberately between gather and propose. It computes the quantity
 from first principles and the model does not see the incoming recommendation
@@ -8,7 +8,10 @@ until after that has happened, so it cannot anchor on 800 and reason backwards
 to justify it. That ordering is the assignment's "should not necessarily be
 assumed to be correct" made structural instead of a line in a prompt.
 
-Writes are not here. This graph decides; block 6 adds execute and verify.
+act either executes (when the platform says the decision is inside the agent's
+authority) or queues it for a buyer. Execution is never the end of it - what was
+written gets read back and checked, and a mismatch goes to the repair loop in
+execute.py.
 """
 import json
 import logging
@@ -19,6 +22,7 @@ from langchain_core.tools import tool
 from langgraph.graph import END, StateGraph
 from typing_extensions import TypedDict
 
+import execute as execute_mod
 import prompts
 from config import cfg
 
@@ -41,6 +45,7 @@ class State(TypedDict, total=False):
     analysis: dict
     proposal: dict
     validation: dict
+    execution: dict
     gather_turns: int
     errors: list
     started: float
@@ -177,16 +182,63 @@ def build(platform, llm):
             "detail": res.get("error", "validation failed")}
         return state
 
+    def act(state):
+        """Execute if allowed, queue for a human if not, record either way."""
+        p = state.get("proposal") or {}
+        plan = state.get("analysis") or {}
+        v = state.get("validation") or {}
+        sit = state["situation"]
+        qty = p.get("qty") or 0
+
+        if v.get("verdict") == "NOT_APPLICABLE" or qty <= 0:
+            platform.record_decision(
+                decision=p.get("decision", "INVESTIGATE"), finalQty=0,
+                explanation=p.get("reasoning"), validationReport=v)
+            state["execution"] = {"outcome": "NO_ACTION"}
+            return state
+
+        action = {
+            "sku": sit["sku"], "nodeId": sit["node_id"],
+            "supplierId": sit["supplier_id"], "qty": qty,
+            "unitPrice": plan.get("unitPrice"),
+            "expectedDelivery": _delivery_date(plan),
+            "reason": p.get("reasoning"),
+        }
+
+        # tier is the platform's call, never the model's. T3 gets queued, and
+        # nothing is ordered until a buyer says so.
+        if v.get("requiresApproval") or v.get("riskTier") == "T3":
+            reason = "; ".join(
+                "%s: %s" % (c["id"], c["detail"]) for c in v.get("checks", [])
+                if c.get("status") in ("APPROVAL", "BLOCK")) or "needs buyer sign off"
+            platform.request_approval(reason=reason, riskTier=v.get("riskTier", "T3"),
+                                      proposedAction=action)
+            platform.record_decision(
+                decision=p.get("decision", "ESCALATE"), finalQty=qty,
+                explanation=p.get("reasoning"), validationReport=v)
+            state["execution"] = {"outcome": "NEEDS_APPROVAL", "action": action}
+            return state
+
+        result = execute_mod.execute_and_verify(
+            platform, llm, state["run_id"], action, plan, sit.get("recommended_qty"))
+        state["execution"] = result
+        platform.record_decision(
+            decision=p.get("decision", "MODIFY"), finalQty=qty,
+            explanation=p.get("reasoning"), validationReport=v)
+        return state
+
     g = StateGraph(State)
     g.add_node("gather", gather)
     g.add_node("analyse", analyse)
     g.add_node("propose", propose)
     g.add_node("preflight", preflight)
+    g.add_node("act", act)
     g.set_entry_point("gather")
     g.add_edge("gather", "analyse")
     g.add_edge("analyse", "propose")
     g.add_edge("propose", "preflight")
-    g.add_edge("preflight", END)
+    g.add_edge("preflight", "act")
+    g.add_edge("act", END)
     return g.compile()
 
 

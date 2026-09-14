@@ -87,6 +87,12 @@ class Gemini:
                 return res
             except Exception as e:
                 last = e
+                if _daily_quota(e):
+                    raise DailyQuotaExhausted(
+                        "gemini free tier daily request quota is spent. it resets on "
+                        "google's clock - try a different GEMINI_MODEL (2.5-flash-lite "
+                        "and 3.1-flash-lite have separate allowances) or wait."
+                    ) from e
                 if not _retryable(e) or attempt == 2:
                     raise
                 sleep = (2**attempt) + random.random()
@@ -100,9 +106,21 @@ class Gemini:
         self.tokens_out += meta.get("output_tokens", 0) or 0
 
 
+class DailyQuotaExhausted(RuntimeError):
+    """The per day free tier allowance is gone. Retrying will not help until
+    the quota resets, so fail loudly rather than burning three more attempts."""
+
+
+def _daily_quota(e):
+    s = str(e)
+    return "PerDay" in s or "free_tier_requests" in s
+
+
 def _retryable(e):
+    if _daily_quota(e):
+        return False
     s = str(e).lower()
-    return any(x in s for x in ("429", "rate", "quota", "503", "500", "timeout", "unavailable"))
+    return any(x in s for x in ("429", "rate", "503", "500", "timeout", "unavailable"))
 
 
 def check_model_available(model=None):

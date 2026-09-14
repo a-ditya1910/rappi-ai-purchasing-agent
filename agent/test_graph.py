@@ -21,9 +21,10 @@ class FakeLLM:
     the tests do not silently depend on how many turns gather happens to take.
     """
 
-    def __init__(self, gather, decision=None):
+    def __init__(self, gather, decision=None, repair=None):
         self.gather = list(gather)
         self.decision = decision
+        self.repair = repair
         self.prompts_seen = []
         self.calls = 0
         self.tokens_in = 0
@@ -33,15 +34,25 @@ class FakeLLM:
         self.calls += 1
         self.prompts_seen.append("\n".join(str(getattr(m, "content", "")) for m in messages))
         names = [getattr(t, "name", "") for t in (tools or [])]
+        if "choose_repair" in names:
+            return self.repair or AIMessage(content="no repair chosen")
         if "record_decision" in names:
             return self.decision or AIMessage(content="no decision was recorded")
         return self.gather.pop(0) if self.gather else AIMessage(content="done gathering")
 
 
 class FakePlatform:
-    def __init__(self, plan=None):
+    def __init__(self, plan=None, validation=None, verification=None):
         self.calls = []
         self.validated = None
+        self.created = []
+        self.amended = []
+        self.approvals = []
+        self.decisions = []
+        self._validation = validation or {"verdict": "NEEDS_APPROVAL", "riskTier": "T3",
+                                          "checks": [], "blocking": [],
+                                          "requiresApproval": True}
+        self._verification = verification or {"outcome": "VERIFIED", "diffs": [], "notes": []}
         self._plan = plan or {
             "recommendedQty": 204, "rawNeed": 156, "inventoryPosition": 680,
             "leadTimeDays": 5, "unitPrice": 0.95, "estimatedCost": 193.80,
@@ -60,8 +71,35 @@ class FakePlatform:
     def validate_purchase(self, **kw):
         self.calls.append("/tools/validate-purchase")
         self.validated = kw
-        return {"ok": True, "data": {"verdict": "NEEDS_APPROVAL", "riskTier": "T3",
-                                     "checks": [], "blocking": []}}
+        return {"ok": True, "data": dict(self._validation)}
+
+    def create_po(self, **kw):
+        self.calls.append("/tools/create-po")
+        self.created.append(kw)
+        return {"ok": True, "data": {
+            "executed": True, "idempotent": False, "poId": "PO-9001",
+            "verification": dict(self._verification), "message": "ok"}}
+
+    def amend_po(self, poId, newQty, expectedVersion, reason):
+        self.calls.append("/tools/amend-po")
+        self.amended.append({"poId": poId, "newQty": newQty})
+        return {"ok": True, "data": {"executed": True, "poId": poId}}
+
+    def cancel_po(self, poId, expectedVersion, reason):
+        self.calls.append("/tools/cancel-po")
+        return {"ok": True, "data": {"executed": True, "poId": poId}}
+
+    def request_approval(self, reason, riskTier, proposedAction):
+        self.calls.append("/tools/request-approval")
+        self.approvals.append({"reason": reason, "riskTier": riskTier,
+                               "action": proposedAction})
+        return {"ok": True, "data": {"approvalId": "AP-1", "status": "PENDING"}}
+
+    def record_decision(self, decision, finalQty=None, explanation=None,
+                        validationReport=None):
+        self.calls.append("/tools/record-decision")
+        self.decisions.append({"decision": decision, "finalQty": finalQty})
+        return {"ok": True, "data": {"ok": True}}
 
     def _ok(self, name, data):
         self.calls.append(name)
@@ -75,7 +113,7 @@ class FakePlatform:
     def suppliers(self, sku):                     return self._ok("/tools/suppliers", [{"supplierId": "SUP-LACTEO", "isActive": True}])
     def budget(self, nodeId, category):           return self._ok("/tools/budget", {"available": 480})
     def storage(self, nodeId, sku=None):          return self._ok("/tools/storage", {"freeCm3": 6000000})
-    def po(self, poId):                           return self._ok("/tools/po", {"poId": poId})
+    def po(self, poId):                           return self._ok("/tools/po", {"poId": poId, "version": 1})
 
 
 def tool_call(name, args, cid="1"):
@@ -175,6 +213,8 @@ def test_no_purchase_means_no_validation_call():
 
     assert out["validation"]["verdict"] == "NOT_APPLICABLE"
     assert "/tools/validate-purchase" not in platform.calls
+    assert "/tools/create-po" not in platform.calls
+    assert out["execution"]["outcome"] == "NO_ACTION"
 
 
 # ---- failure modes ---------------------------------------------------------
@@ -201,3 +241,82 @@ def test_unknown_tool_is_reported_back_rather_than_crashing():
     llm = FakeLLM([tool_call("get_the_answer", {}), gathered_everything()], decision())
     out = run(llm, FakePlatform())
     assert out["proposal"]["decision"] == "MODIFY"
+
+
+# ---- act: execute, or hand it to a human ----------------------------------
+
+def auto_approve():
+    return {"verdict": "PASS", "riskTier": "T2", "checks": [], "blocking": [],
+            "requiresApproval": False}
+
+
+def test_t3_queues_for_a_buyer_and_orders_nothing():
+    platform = FakePlatform()          # defaults to T3
+    out = run(FakeLLM([gathered_everything()], decision()), platform)
+
+    assert out["execution"]["outcome"] == "NEEDS_APPROVAL"
+    assert platform.approvals, "should have raised an approval"
+    assert "/tools/create-po" not in platform.calls, "nothing may be ordered at T3"
+    assert platform.approvals[0]["action"]["qty"] == 204
+
+
+def test_t2_executes_and_the_write_is_verified():
+    platform = FakePlatform(validation=auto_approve())
+    out = run(FakeLLM([gathered_everything()], decision()), platform)
+
+    assert out["execution"]["outcome"] == "VERIFIED"
+    assert out["execution"]["poId"] == "PO-9001"
+    assert platform.created[0]["qty"] == 204
+    assert not platform.approvals
+
+
+def test_same_intent_always_gets_the_same_idempotency_key():
+    import execute
+    a = execute.idempotency_key("run-1", "create_po", "SKU-MILK-1L", 204)
+    b = execute.idempotency_key("run-1", "create_po", "SKU-MILK-1L", 204)
+    c = execute.idempotency_key("run-1", "create_po", "SKU-MILK-1L", 240)
+    assert a == b, "a retry must not become a second order"
+    assert a != c
+
+
+def test_a_mismatch_triggers_repair_not_a_shrug():
+    shortfall = {"outcome": "MISMATCH", "notes": [],
+                 "diffs": [{"level": "L1", "field": "qtyConfirmed", "intended": "204",
+                            "actual": "120", "ok": False}]}
+    platform = FakePlatform(validation=auto_approve(), verification=shortfall)
+    llm = FakeLLM([gathered_everything()], decision(),
+                  repair=tool_call("choose_repair", {"repair": "amend", "qty": 120,
+                                                     "reasoning": "match what was confirmed"}))
+    out = run(llm, platform)
+
+    assert out["execution"]["outcome"] == "REPAIRED"
+    assert platform.amended[0]["newQty"] == 120
+
+
+def test_accept_as_is_is_refused_when_the_shelf_is_still_empty():
+    """The option a model reaches for when it wants to be done. If L3 failed the
+    goal was not met, so it must not be available."""
+    stockout = {"outcome": "MISMATCH", "notes": ["still short: 2 days"],
+                "diffs": [{"level": "L3", "field": "stockoutDays", "intended": "0",
+                           "actual": "2", "ok": False}]}
+    platform = FakePlatform(validation=auto_approve(), verification=stockout)
+    llm = FakeLLM([gathered_everything()], decision(),
+                  repair=tool_call("choose_repair", {"repair": "accept_as_is",
+                                                     "reasoning": "close enough"}))
+    out = run(llm, platform)
+
+    assert out["execution"]["outcome"] == "ESCALATED"
+    assert any("refused" in str(r.get("overridden", "")) for r in out["execution"]["repairs"])
+
+
+def test_a_repair_outside_the_allowed_set_escalates():
+    mismatch = {"outcome": "MISMATCH", "notes": [],
+                "diffs": [{"level": "L1", "field": "qtyConfirmed", "intended": "204",
+                           "actual": "120", "ok": False}]}
+    platform = FakePlatform(validation=auto_approve(), verification=mismatch)
+    llm = FakeLLM([gathered_everything()], decision(),
+                  repair=tool_call("choose_repair", {"repair": "reorder_everything_twice",
+                                                     "reasoning": "creative"}))
+    out = run(llm, platform)
+
+    assert out["execution"]["outcome"] == "ESCALATED"

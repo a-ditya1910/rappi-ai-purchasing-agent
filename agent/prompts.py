@@ -63,3 +63,26 @@ Explain the trade-off, not just the number. If your quantity differs from the \
 recommendation, say what specifically drives the difference. If a constraint \
 forces a quantity nobody would choose freely, say so and say what the \
 alternative costs."""
+
+
+REPAIR = """The order was placed, but checking it afterwards found this does not match what was intended.
+
+MISMATCHES
+{mismatches}
+
+{notes}
+
+We ordered {ordered} units. The plan behind that was:
+{plan}
+
+This is repair attempt {attempt} of {max_attempts}.
+
+Choose one repair and say why:
+
+  amend                change the quantity on the existing order
+  split                keep what was confirmed, source the rest elsewhere
+  cancel_and_recreate  the order is wrong enough to start again
+  accept_as_is         the difference does not matter
+  escalate             a buyer needs to decide this
+
+accept_as_is is only available when the shelf is still covered. If an L3 check failed the goal was not met, and accepting it is not an option - the paperwork being survivable is not the same as the store having stock."""
