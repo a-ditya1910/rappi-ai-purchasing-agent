@@ -16,10 +16,10 @@ Quantities come from tested Java. Permission comes from a deterministic constrai
 git clone https://github.com/a-ditya1910/rappi-ai-purchasing-agent.git
 cd rappi-ai-purchasing-agent
 cp .env.example .env          # paste a free Gemini key, see below
-docker compose up              # mysql, redis, platform, agent
+docker compose up              # mysql, redis, platform, agent, web
 ```
 
-Then `http://localhost:8080/actuator/health`. Flyway migrates and seeds on first boot.
+Then open **http://localhost:5173**. Flyway migrates and seeds on first boot.
 
 For development with hot reload, run the two services yourself instead:
 
@@ -27,6 +27,7 @@ For development with hot reload, run the two services yourself instead:
 docker compose up -d mysql redis
 cd platform && ./mvnw spring-boot:run          # :8080
 cd agent && pip install -r requirements.txt && uvicorn main:app --port 8100
+cd web && npm install && npm run dev           # :5173
 ```
 
 A Gemini key is free and needs no credit card: **https://aistudio.google.com/apikey**
@@ -55,6 +56,18 @@ curl -s localhost:8080/approvals
 curl -s -XPOST localhost:8080/approvals/<id>/decide -H 'Content-Type: application/json' \
   -d '{"decision":"approve","decidedBy":"buyer:ana","note":"agreed"}'
 ```
+
+### The console
+
+Three screens at **http://localhost:5173**:
+
+**Scenario console** — the situation a buyer would be looking at (position broken into its parts, forecast, budget, open POs, demand verdict), then what the agent did about it: the quantity derivation quoted from the planner, the reasoning, the constraint checks that did not pass, and what it took on faith.
+
+The recommended quantity is **editable**. Type 50000 and watch it refuse — that says more about the system than any amount of prose.
+
+**Approval queue** — the T3 decisions waiting on a human, each with the specific check that made it their call. Approving hands it back to the agent, which then runs the same execute-and-verify path an auto-approved action takes. Rejecting requires a note, because that note is the only feedback the agent gets.
+
+**Run trace** — every step, written by the platform's interceptor rather than by the agent.
 
 ---
 
@@ -258,7 +271,6 @@ Stated plainly rather than left to be discovered.
 | Gap | Detail |
 |---|---|
 | **No forecast override** | The agent correctly detects a stale, wrong forecast and correctly refuses to act on the resulting number — but has no way to recompute with an observed rate. The fix is a `demandOverride` parameter on `calculate-reorder`. Scoped out rather than half-built. |
-| **No React console** | The run trace is inspectable via `GET /runs/{id}`, and the verification diff is in the API response. A UI was the right thing to cut. |
 | **Retrieval is term overlap, not embeddings** | Seven policy documents. Cosine over embeddings is a 15-line swap behind the same interface. Knowing where the threshold sits matters more than reaching for a vector store. |
 | **Single currency, single region** | No FX. |
 | **No auth** | One buyer identity. Not graded, and it would cost an hour. |
@@ -286,6 +298,7 @@ Stated plainly rather than left to be discovered.
 ```
 platform/   spring boot - mysql, planner, constraint engine, tools, verifier
 agent/      python - langgraph, gemini adapter, repair loop
+web/        react - scenario console, approval queue, run trace
 evals/      cases.json, run_evals.py, recorded/
 ```
 
