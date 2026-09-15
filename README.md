@@ -71,6 +71,24 @@ The recommended quantity is **editable**. Type 50000 and watch it refuse — tha
 
 **Run trace** — every step, written by the platform's interceptor rather than by the agent.
 
+### What it looks like
+
+The console. Left is the situation a buyer would be looking at — position broken into its parts, so the units already in transit are visible rather than buried. Right is what the agent did about it.
+
+Here the recommended quantity has been set to **50,000** to show what happens to an implausible number: the agent refuses it, and says why in terms of storage and budget rather than just declining.
+
+![Scenario console](docs-images/1-console.png)
+
+Decisions the agent is not allowed to make on its own land in the approval queue, each with the specific check that made it a human's call:
+
+![Approval queue](docs-images/2-approval.png)
+
+Every run keeps its trace. The steps below were written by one Spring interceptor — the agent contains no tracing code, because its tool calls happen to be HTTP requests.
+
+This run is the one that changed my mind during development. I expected `MODIFY`; the agent returned `INVESTIGATE` and explained that the forecast was stale at 44/day against actuals of 102/day, so the planner's quantity was built on a number it had reason to distrust. That is better judgement than I asked for, so the eval expectation changed rather than the agent.
+
+![Run trace](docs-images/3-trace.png)
+
 ### Verified state
 
 From a clean `docker compose down && docker compose up --build`:
