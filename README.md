@@ -32,6 +32,8 @@ cd web && npm install && npm run dev           # :5173
 
 A Gemini key is free and needs no credit card: **https://aistudio.google.com/apikey**
 
+> **On model choice.** Quotas are per model and the free per-day cap is small — `gemini-3.6-flash` ran out after roughly 32 calls during development. `.env.example` therefore defaults to `gemini-3.1-flash-lite`, which has a more generous allowance and is what the recorded runs used. `gemini-3.6-flash` reasons noticeably better if your quota allows it. The agent makes a real one-token call on startup and, if the configured model fails, names the ones it successfully reached.
+
 **The evaluation suite needs no key at all** — it replays recorded runs:
 
 ```bash
@@ -69,6 +71,27 @@ The recommended quantity is **editable**. Type 50000 and watch it refuse — tha
 
 **Run trace** — every step, written by the platform's interceptor rather than by the agent.
 
+### Verified state
+
+From a clean `docker compose down && docker compose up --build`:
+
+```
+containers      5/5 up, mysql + redis healthy
+platform        UP (db UP, redis UP)
+agent           ok, model reachable, key configured
+web             HTTP 200, /api and /agent proxies both reach their backend
+
+java tests      34 passing   (18 planner, 16 constraint engine)
+python tests    15 passing
+eval suite      28 of 29 checks   (the one failure is deliberate, see below)
+
+live run through the web proxy
+                MODIFY 204 · tier T3 · NEEDS_APPROVAL
+                3 model calls, 12 tool calls, 9.0s, 0 errors
+```
+
+Integration tests (`*IT.java`) are excluded from the default Surefire run because they need a live database. Run them with `./mvnw test -Dtest='*IT'` once the stack is up.
+
 ---
 
 ## Architecture
@@ -86,6 +109,9 @@ flowchart TB
         P["ReorderPlanner<br/>the arithmetic"]
         C["ConstraintEngine<br/>18 checks + risk tier"]
         V["Verifier<br/>L1 / L2 / L3"]
+        CS["CoverageSimulator<br/>walks the shelf day by day"]
+        D["DemandAnomalyDetector<br/>tracking signal, Tukey"]
+        PR["PolicyRetriever<br/>the buying rules"]
         S["SupplierMockService<br/>applies its own caps"]
     end
 
@@ -97,8 +123,8 @@ flowchart TB
     G -->|"HTTP + X-Run-Id"| T
     R --> T
     T --> I --> DB
-    T --> P & C & V & S
-    P & C & V --> DB
+    T --> P & C & V & CS & D & PR & S
+    P & C & V & CS & D --> DB
     G --> RD
 ```
 
@@ -221,7 +247,17 @@ Other guardrails: Bean Validation rejects hallucinated arguments before any logi
 
 This deliberately does **not** use a z-score. A z-score is not robust: the soda series carries one 1,070-unit B2B order that inflates the mean and the standard deviation together, so the ratio shrinks and the outlier hides behind the damage it caused.
 
+`DemandAnomalyDetector` instead strips point outliers with a Tukey fence, then measures what remains with a **tracking signal** — cumulative forecast error over mean absolute deviation, which is the number a demand planner already watches.
+
+One subtlety that took a bug to find: a Tukey fence flags *isolated* points, so given a genuine 14-day level shift it flagged the entire shifted segment, stripped it, and reported `sustainedDays: 1`. The filter deleted the signal it existed to protect. Run length is now measured on the **raw** series, and a series with more than 20% of days flagged is treated as shifted rather than noisy.
+
 **Scenario 4 — constraint.** Rice needs 713 units, the budget affords 140, and the only supplier's minimum is 1,000. **No legal purchase exists**, so the agent orders nothing and says why.
+
+### Policies at decision time
+
+`PolicyRetriever` serves seven buying rules — partial fulfilment, price variance tolerance, perishable over-buy, budget exceptions, supplier reliability, inter-node transfers, acting on forecast deviation. The agent looks them up when it hits the situation they cover, and cites the id.
+
+Retrieval is **term overlap scored in Java**, not embeddings. Said plainly because it matters: the part that counts is policy text arriving at decision time and being cited, rather than baked into a prompt — and it costs no model quota, because the lookup never leaves the platform. Cosine over embeddings is a fifteen-line swap behind the same method. Seven documents is a long way from needing a vector store.
 
 ---
 
