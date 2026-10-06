@@ -437,7 +437,8 @@ def test_the_llm_reports_each_call_with_its_tokens(monkeypatch):
             return AIMessage(content="ok", usage_metadata={
                 "input_tokens": 120, "output_tokens": 30, "total_tokens": 150})
 
-    monkeypatch.setattr(llm_mod.cfg, "gemini_key", "test-key")
+    # patch the class: require_key() reads it from there, and CI has no .env key to fall back on
+    monkeypatch.setattr(type(llm_mod.cfg), "gemini_key", "test-key")
     seen = []
     g = llm_mod.Gemini(limiter=NoLimit(), on_call=lambda **kw: seen.append(kw))
     g._chat = FakeChat()
@@ -463,7 +464,8 @@ def test_a_broken_tracer_does_not_break_the_call(monkeypatch):
     def boom(**kw):
         raise RuntimeError("platform is down")
 
-    monkeypatch.setattr(llm_mod.cfg, "gemini_key", "test-key")
+    # patch the class: require_key() reads it from there, and CI has no .env key to fall back on
+    monkeypatch.setattr(type(llm_mod.cfg), "gemini_key", "test-key")
     g = llm_mod.Gemini(limiter=NoLimit(), on_call=boom)
     g._chat = FakeChat()
 
