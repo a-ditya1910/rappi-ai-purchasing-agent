@@ -73,6 +73,7 @@ public class ToolController {
     private final DemandAnomalyDetector anomalies;
     private final SupplierRanker ranker;
     private final TransferPlanner transferPlanner;
+    private final MasterData masterData;
     private final Clock clock;
 
     public ToolController(ProductRepo products, NodeRepo nodes, SupplierRepo suppliers,
@@ -80,7 +81,8 @@ public class ToolController {
                           ForecastRepo forecasts, SalesRepo sales, BudgetRepo budgets,
                           PurchaseOrderRepo purchaseOrders, ReorderPlanner planner,
                           ConstraintEngine constraints, DemandAnomalyDetector anomalies,
-                          SupplierRanker ranker, TransferPlanner transferPlanner, Clock clock) {
+                          SupplierRanker ranker, TransferPlanner transferPlanner,
+                          MasterData masterData, Clock clock) {
         this.products = products;
         this.nodes = nodes;
         this.suppliers = suppliers;
@@ -95,6 +97,7 @@ public class ToolController {
         this.anomalies = anomalies;
         this.ranker = ranker;
         this.transferPlanner = transferPlanner;
+        this.masterData = masterData;
         this.clock = clock;
     }
 
@@ -124,17 +127,7 @@ public class ToolController {
 
     @GetMapping("/product")
     public ToolResponse<Map<String, Object>> product(@RequestParam String sku) {
-        Product p = products.findById(sku).orElseThrow(() -> unknownSku(sku));
-        Map<String, Object> out = new LinkedHashMap<>();
-        out.put("sku", p.getSku());
-        out.put("name", p.getName());
-        out.put("category", p.getCategory());
-        out.put("casePack", p.getCasePack());
-        out.put("unitVolumeCm3", p.getUnitVolumeCm3());
-        out.put("shelfLifeDays", p.getShelfLifeDays());
-        out.put("isPerishable", p.isPerishable());
-        out.put("abcClass", p.getAbcClass());
-        return ToolResponse.ok(out);
+        return ToolResponse.ok(masterData.product(sku));
     }
 
     @GetMapping("/inventory-position")
@@ -285,24 +278,7 @@ public class ToolController {
 
     @GetMapping("/suppliers")
     public ToolResponse<List<Map<String, Object>>> suppliersFor(@RequestParam String sku) {
-        List<SupplierProduct> offers = supplierProducts.findBySku(sku);
-        if (offers.isEmpty()) {
-            throw new NotFound("NO_SUPPLIERS", "no supplier supplies " + sku);
-        }
-        return ToolResponse.ok(offers.stream().map(sp -> {
-            Supplier s = suppliers.findById(sp.getSupplierId()).orElseThrow();
-            Map<String, Object> m = new LinkedHashMap<>();
-            m.put("supplierId", s.getId());
-            m.put("name", s.getName());
-            m.put("unitPrice", sp.getUnitPrice());
-            m.put("moqUnits", Math.max(s.getMoqUnits(), sp.getMinOrderUnits()));
-            m.put("leadTimeDays", s.getLeadTimeDays());
-            m.put("leadTimeStd", s.getLeadTimeStd());
-            m.put("maxDailyCapacity", sp.getMaxDailyCapacity());
-            m.put("reliabilityScore", s.getReliabilityScore());
-            m.put("isActive", s.isActive());
-            return m;
-        }).toList());
+        return ToolResponse.ok(masterData.suppliers(sku));
     }
 
     @GetMapping("/budget")
@@ -371,11 +347,6 @@ public class ToolController {
     }
 
     // ---- errors ------------------------------------------------------------
-
-    private NotFound unknownSku(String sku) {
-        List<String> known = products.findAll().stream().map(Product::getSku).limit(10).toList();
-        return new NotFound("SKU_NOT_FOUND", "unknown sku " + sku, known);
-    }
 
     /** Carries a machine-readable code and, where useful, what the caller could have meant. */
     public static class NotFound extends RuntimeException {

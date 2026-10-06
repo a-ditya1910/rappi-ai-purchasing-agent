@@ -31,6 +31,8 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -70,6 +72,7 @@ public class PurchaseOrderService {
     private final ApprovalRepo approvals;
     private final SupplierEventRepo events;
     private final SupplierRepo suppliers;
+    private final MasterData masterData;
     private final ReorderPlanner planner;
     private final ConstraintEngine constraints;
     private final SupplierMockService supplierApi;
@@ -79,7 +82,8 @@ public class PurchaseOrderService {
 
     public PurchaseOrderService(PurchaseOrderRepo purchaseOrders, ProductRepo products,
                                 BudgetRepo budgets, InventoryRepo inventory, ApprovalRepo approvals,
-                                SupplierEventRepo events, SupplierRepo suppliers, ReorderPlanner planner, ConstraintEngine constraints,
+                                SupplierEventRepo events, SupplierRepo suppliers, MasterData masterData,
+                                ReorderPlanner planner, ConstraintEngine constraints,
                                 SupplierMockService supplierApi, ObjectMapper json,
                                 EntityManager em, Clock clock) {
         this.purchaseOrders = purchaseOrders;
@@ -89,6 +93,7 @@ public class PurchaseOrderService {
         this.approvals = approvals;
         this.events = events;
         this.suppliers = suppliers;
+        this.masterData = masterData;
         this.planner = planner;
         this.constraints = constraints;
         this.supplierApi = supplierApi;
@@ -464,6 +469,16 @@ public class PurchaseOrderService {
         BigDecimal after = nextReliability(before, fill, onTime);
         supplier.setReliabilityScore(after);
         suppliers.save(supplier);
+
+        // drop the cached supplier list once this commits, not before - evicting
+        // inside the transaction lets another request re-cache the old score in
+        // the gap before the new one is visible
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                masterData.suppliersChanged();
+            }
+        });
 
         int open = open(line);
         line.setQtyReceived(qtyReceived);

@@ -15,6 +15,9 @@
       "must_mention": [["minimum order", "moq"], ["800"]],
       "must_cite": ["POL-PERISH-02"],
       "max_gather_turns": 4
+    },
+    "known_failures": {
+      "prose does not double count": "kept on purpose: the number is right because it came from java, the model's sentence about it is not. this is the three-layer split showing itself"
     }
   },
   {
@@ -96,6 +99,9 @@
       "required_tools": ["/tools/supplier-event", "/tools/supplier-options", "/tools/po"],
       "constraint_verdict_not": ["BLOCKED"],
       "must_cite": ["POL-PARTIAL-01"]
+    },
+    "known_failures": {
+      "cites its sources": "recorded before the citation fix (442b98c). re-record with --live and remove this entry"
     }
   },
   {

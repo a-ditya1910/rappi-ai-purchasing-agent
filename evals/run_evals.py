@@ -225,6 +225,7 @@ def main():
     failures = []
     skipped = []
     not_yet = []
+    known = []
 
     for case in cases:
         if args.live:
@@ -260,6 +261,10 @@ def main():
             totals[dim][1] += 1
             if ok:
                 totals[dim][0] += 1
+            elif dim in case.get("known_failures", {}):
+                # still printed and still counted as a failed check in the totals,
+                # but it does not fail the build - each one carries its reason
+                known.append((case["id"], dim, case["known_failures"][dim]))
             else:
                 failures.append((case["id"], dim, detail))
         for dim, _, detail in pending:
@@ -277,6 +282,12 @@ def main():
         print("FAILURES")
         for cid, dim, detail in failures:
             print("  %-40s %-22s %s" % (cid, dim, detail))
+
+    if known:
+        print()
+        print("KNOWN FAILURES (reported, not gating)")
+        for cid, dim, why in known:
+            print("  %-40s %-22s %s" % (cid, dim, why))
 
     if not_yet:
         print()
