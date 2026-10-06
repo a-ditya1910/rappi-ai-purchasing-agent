@@ -31,10 +31,14 @@ log = logging.getLogger(__name__)
 # facts a decision is not defensible without, per scenario
 REQUIRED = {
     "S1_REVIEW": ["inventory-position", "demand-forecast", "open-pos",
-                  "suppliers", "budget", "storage"],
-    "S2_PARTIAL": ["po", "inventory-position", "demand-forecast", "suppliers"],
-    "S3_DEMAND": ["sales-actuals", "demand-forecast", "inventory-position", "open-pos"],
+                  "suppliers", "budget", "storage", "search-knowledge"],
+    "S2_PARTIAL": ["po", "inventory-position", "demand-forecast", "suppliers",
+                   "search-knowledge"],
+    "S3_DEMAND": ["sales-actuals", "demand-forecast", "inventory-position", "open-pos",
+                  "search-knowledge"],
 }
+
+MAX_RETRIEVED = 8
 
 
 class State(TypedDict, total=False):
@@ -42,6 +46,8 @@ class State(TypedDict, total=False):
     scenario: str
     situation: dict
     facts: dict
+    retrieved: list
+    searches: list
     analysis: dict
     proposal: dict
     validation: dict
@@ -51,11 +57,14 @@ class State(TypedDict, total=False):
     started: float
 
 
-def build(platform, llm):
-    """Wires the graph. platform and llm are injected so tests can drive the
-    whole thing with fakes and no network."""
+def build(platform, llm, kb=None):
+    """Wires the graph. platform, llm and kb (knowledge search) are injected so
+    tests can drive the whole thing with fakes and no network."""
 
-    read_tools = _read_tools(platform)
+    if kb is None:
+        import rag
+        kb = rag.search
+    read_tools = _read_tools(platform, kb)
 
     def gather(state):
         state.setdefault("facts", {})
@@ -151,6 +160,8 @@ def build(platform, llm):
         msgs = [SystemMessage(prompts.SYSTEM),
                 HumanMessage(prompts.PROPOSE.format(
                     facts=_summarise(state["facts"]),
+                    retrieved="\n\n".join(state.get("retrieved") or [])
+                              or "(nothing was retrieved)",
                     analysis="\n".join(plan.get("explanationSteps", [])),
                     recommendation_line=rec_line))]
 
@@ -193,7 +204,7 @@ def build(platform, llm):
         if v.get("verdict") == "NOT_APPLICABLE" or qty <= 0:
             platform.record_decision(
                 decision=p.get("decision", "INVESTIGATE"), finalQty=0,
-                explanation=p.get("reasoning"), validationReport=v, **_stats(llm, state))
+                explanation=_explain(p), validationReport=v, **_stats(llm, state))
             state["execution"] = {"outcome": "NO_ACTION"}
             return state
 
@@ -219,7 +230,7 @@ def build(platform, llm):
                                       proposedAction=action)
             platform.record_decision(
                 decision=p.get("decision", "ESCALATE"), finalQty=qty,
-                explanation=p.get("reasoning"), validationReport=v, **_stats(llm, state))
+                explanation=_explain(p), validationReport=v, **_stats(llm, state))
             state["execution"] = {"outcome": "NEEDS_APPROVAL", "action": action}
             return state
 
@@ -228,7 +239,7 @@ def build(platform, llm):
         state["execution"] = result
         platform.record_decision(
             decision=p.get("decision", "MODIFY"), finalQty=qty,
-            explanation=p.get("reasoning"), validationReport=v, **_stats(llm, state))
+            explanation=_explain(p), validationReport=v, **_stats(llm, state))
         return state
 
     g = StateGraph(State)
@@ -248,7 +259,44 @@ def build(platform, llm):
 
 # ---- tools exposed to the model -------------------------------------------
 
-def _read_tools(platform):
+def _read_tools(platform, kb):
+    @tool
+    def search_knowledge(query: str, doc_type: str = None, sku: str = None,
+                         supplier_id: str = None) -> dict:
+        """Search the buying policies, the replenishment playbook, supplier profiles,
+        product notes and past decisions.
+
+        Filter with doc_type, because the playbook covers the same topics as the
+        policies and will crowd them out otherwise:
+          policy    the rule that applies - search this before deciding
+          playbook  how buyers usually handle a situation
+          supplier  a supplier's capacity and behaviour (add supplier_id)
+          product   storage, shelf life, demand notes
+          decision  what was decided before for this product (add sku)
+        Cite the ref of anything you rely on."""
+        filters = {k: v for k, v in (("doc_type", doc_type), ("sku", sku),
+                                     ("supplier_id", supplier_id)) if v}
+        out = kb(query, **filters)
+
+        # this search never passes through the platform, so the interceptor can't
+        # trace it. log it ourselves - query, filters and what came back - or a bad
+        # answer can't be traced to a bad retrieval
+        try:
+            platform.log_step("RETRIEVAL", "search_knowledge", {
+                "query": query, "filters": filters,
+                "hits": [{"ref": h["ref"], "similarity": h["similarity"]}
+                         for h in out.get("data") or []],
+                "error": out.get("error")})
+        except Exception as e:
+            log.warning("could not trace a knowledge search: %s", e)
+        return out
+
+    @tool
+    def get_demand_anomaly(sku: str, node_id: str) -> dict:
+        """Whether a demand change is real or explained (promotion, one-off order):
+        tracking signal, how many days it has lasted, and a verdict."""
+        return platform.demand_anomaly(sku, node_id)
+
     @tool
     def get_product(sku: str) -> dict:
         """Master data for a sku: case pack, shelf life, volume, abc class."""
@@ -294,21 +342,22 @@ def _read_tools(platform):
         """One purchase order with its lines and confirmed quantities."""
         return platform.po(po_id)
 
-    return [get_product, get_inventory_position, get_demand_forecast,
-            get_sales_actuals, list_open_pos, get_suppliers, get_budget,
-            get_storage, get_purchase_order]
+    return [search_knowledge, get_product, get_inventory_position, get_demand_forecast,
+            get_sales_actuals, get_demand_anomaly, list_open_pos, get_suppliers,
+            get_budget, get_storage, get_purchase_order]
 
 
 def _decision_tool():
     @tool
     def record_decision(decision: str, reasoning: str, key_factors: list,
                         confidence: float, qty: int = 0,
-                        assumptions: list = None) -> dict:
+                        assumptions: list = None, citations: list = None) -> dict:
         """Record the purchasing decision.
 
         decision must be one of ACCEPT, MODIFY, REJECT, INVESTIGATE, ESCALATE.
         qty is the quantity to order, 0 if nothing should be ordered.
         assumptions are anything you took on faith rather than verified.
+        citations are the refs of the reference documents the decision relies on.
         """
         return {"ok": True}
 
@@ -327,6 +376,17 @@ def _run_tool(tools, call, state):
     except Exception as e:
         out = {"ok": False, "error": "TOOL_FAILED", "detail": str(e)}
     state.setdefault("facts", {})[call["name"]] = out
+
+    # retrieved text is kept apart from the facts: facts are keyed by tool name, so
+    # a second search would overwrite the first, and facts get cut to 800 chars for
+    # the propose prompt, which would cut a policy in half
+    if call["name"] == "search_knowledge":
+        state.setdefault("searches", []).append(call["args"])
+    if call["name"] == "search_knowledge" and out.get("ok"):
+        kept = state.setdefault("retrieved", [])
+        for hit in out.get("data") or []:
+            if hit["text"] not in kept and len(kept) < MAX_RETRIEVED:
+                kept.append(hit["text"])
     return out
 
 
@@ -350,6 +410,8 @@ def _summarise(facts):
     and models reason worse when buried in irrelevant rows."""
     out = []
     for name, val in facts.items():
+        if name == "search_knowledge":
+            continue    # goes into the prompt whole, in its own block
         body = val.get("data") if isinstance(val, dict) else val
         text = json.dumps(body, default=str)
         if len(text) > 800:
@@ -362,13 +424,23 @@ def _extract_decision(res, plan):
     calls = getattr(res, "tool_calls", None) or []
     if calls:
         args = dict(calls[0]["args"])
-        if not args.get("qty"):
+        if args.get("decision") in ("REJECT", "INVESTIGATE"):
+            # nothing is ordered for these, so the record should not say "REJECT 204"
+            args["qty"] = 0
+        elif not args.get("qty"):
             args["qty"] = plan.get("recommendedQty", 0)
         return args
     # model answered in prose instead of calling the tool
     return {"decision": "INVESTIGATE",
             "reasoning": getattr(res, "content", "") or "no structured decision returned",
             "key_factors": [], "confidence": 0.0, "qty": 0}
+
+
+def _explain(p):
+    why = p.get("reasoning") or ""
+    if p.get("citations"):
+        why += "\n\nSources: " + ", ".join(p["citations"])
+    return why
 
 
 def _stats(llm, state):

@@ -14,6 +14,11 @@ class Config:
     model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
     judge_model = os.getenv("GEMINI_JUDGE_MODEL", "gemini-3.1-flash-lite")
     rpm_limit = int(os.getenv("GEMINI_RPM_LIMIT", "14"))
+    embed_model = os.getenv("GEMINI_EMBED_MODEL", "gemini-embedding-001")
+
+    # the agent's own knowledge index (pgvector). not the system of record - that
+    # is the platform's mysql, which the agent still has no credentials for
+    vector_db_url = os.getenv("VECTOR_DB_URL", "postgresql+psycopg://rag:rag@localhost:5433/rag")
 
     platform_url = os.getenv("PLATFORM_BASE_URL", "http://localhost:8080")
     redis_host = os.getenv("REDIS_HOST", "localhost")

@@ -13,6 +13,7 @@
       "risk_tier": "T3",
       "constraint_verdict_not": ["BLOCKED"],
       "must_mention": [["minimum order", "moq"], ["800"]],
+      "must_cite": ["POL-PERISH-02"],
       "max_gather_turns": 4
     }
   },
@@ -52,6 +53,7 @@
       "required_tools": ["/tools/sales-actuals", "/tools/demand-forecast"],
       "anomaly_verdict": "REAL",
       "must_mention": [["stale", "forecast"], ["102", "actual"]],
+      "must_cite": ["POL-FORECAST-01"],
       "constraint_verdict_not": ["BLOCKED"]
     }
   },
@@ -64,6 +66,7 @@
       "decision": ["INVESTIGATE", "REJECT", "ACCEPT", "MODIFY"],
       "required_tools": ["/tools/sales-actuals"],
       "anomaly_verdict": "EXPLAINED",
+      "must_cite": ["POL-FORECAST-01"],
       "qty_range": [0, 120],
       "note": "must not scale up for a spike that is already explained"
     }
@@ -77,6 +80,7 @@
       "decision": ["ESCALATE", "INVESTIGATE", "REJECT"],
       "qty_range": [0, 0],
       "expect_no_purchase": true,
+      "must_cite": ["POL-BUDGET-EXC-01"],
       "note": "ordering anything here would be rejected by the supplier or blow the budget"
     }
   }

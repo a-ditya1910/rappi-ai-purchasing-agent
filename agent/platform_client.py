@@ -128,9 +128,6 @@ class Platform:
     def demand_anomaly(self, sku, nodeId, lookbackDays=60):
         return self.get("/tools/demand-anomaly", sku=sku, nodeId=nodeId, lookbackDays=lookbackDays)
 
-    def policy_search(self, query, k=3):
-        return self.get("/tools/policy-search", query=query, k=k)
-
     # ---- run bookkeeping -------------------------------------------------
 
     def log_step(self, type_, name, payload=None, latencyMs=None, tokens=None):

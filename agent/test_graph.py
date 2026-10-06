@@ -43,6 +43,20 @@ class FakeLLM:
         return self.gather.pop(0) if self.gather else AIMessage(content="done gathering")
 
 
+class FakeKB:
+    """Stands in for rag.search. Records every query it was asked."""
+
+    def __init__(self, hits=None):
+        self.queries = []
+        self.hits = hits if hits is not None else [
+            {"ref": "POL-PERISH-02", "type": "policy", "similarity": 0.81,
+             "text": '<retrieved_doc ref="POL-PERISH-02">up to 1.25 times shelf life</retrieved_doc>'}]
+
+    def __call__(self, query, **filters):
+        self.queries.append((query, filters))
+        return {"ok": True, "data": list(self.hits)}
+
+
 class FakePlatform:
     def __init__(self, plan=None, validation=None, verification=None):
         self.calls = []
@@ -51,6 +65,7 @@ class FakePlatform:
         self.amended = []
         self.approvals = []
         self.decisions = []
+        self.steps = []
         self._validation = validation or {"verdict": "NEEDS_APPROVAL", "riskTier": "T3",
                                           "checks": [], "blocking": [],
                                           "requiresApproval": True}
@@ -100,8 +115,12 @@ class FakePlatform:
     def record_decision(self, decision, finalQty=None, explanation=None,
                         validationReport=None, **stats):
         self.calls.append("/tools/record-decision")
-        self.decisions.append({"decision": decision, "finalQty": finalQty, **stats})
+        self.decisions.append({"decision": decision, "finalQty": finalQty,
+                               "explanation": explanation, **stats})
         return {"ok": True, "data": {"ok": True}}
+
+    def log_step(self, type_, name, payload=None, latencyMs=None, tokens=None):
+        self.steps.append({"type": type_, "name": name, "payload": payload})
 
     def _ok(self, name, data):
         self.calls.append(name)
@@ -116,6 +135,7 @@ class FakePlatform:
     def budget(self, nodeId, category):           return self._ok("/tools/budget", {"available": 480})
     def storage(self, nodeId, sku=None):          return self._ok("/tools/storage", {"freeCm3": 6000000})
     def po(self, poId):                           return self._ok("/tools/po", {"poId": poId, "version": 1})
+    def demand_anomaly(self, sku, nodeId, l=60):  return self._ok("/tools/demand-anomaly", {"verdict": "REAL"})
 
 
 def tool_call(name, args, cid="1"):
@@ -132,6 +152,7 @@ def gathered_everything():
         {"name": "get_suppliers", "args": {"sku": "SKU-MILK-1L"}, "id": "d"},
         {"name": "get_budget", "args": {"node_id": "NODE-BOG-01", "category": "dairy"}, "id": "e"},
         {"name": "get_storage", "args": {"node_id": "NODE-BOG-01"}, "id": "f"},
+        {"name": "search_knowledge", "args": {"query": "perishable over-buy"}, "id": "g"},
     ])
 
 
@@ -151,8 +172,8 @@ def situation(**over):
             "facts": {}, "errors": []}
 
 
-def run(llm, platform, state=None):
-    return graph.build(platform, llm).invoke(state or situation())
+def run(llm, platform, state=None, kb=None):
+    return graph.build(platform, llm, kb or FakeKB()).invoke(state or situation())
 
 
 # ---- the ordering that stops anchoring ------------------------------------
@@ -408,3 +429,78 @@ def test_a_broken_tracer_does_not_break_the_call(monkeypatch):
     g._chat = FakeChat()
 
     assert g.invoke(["hi"]).content == "ok"
+
+
+# ---- retrieval at decision time --------------------------------------------
+
+def test_retrieved_text_reaches_the_propose_prompt_whole():
+    long_policy = "x" * 1200 + " the 1.5x hard limit"
+    kb = FakeKB([{"ref": "POL-PERISH-02", "type": "policy", "similarity": 0.8,
+                  "text": f'<retrieved_doc ref="POL-PERISH-02">{long_policy}</retrieved_doc>'}])
+    llm = FakeLLM([gathered_everything()], decision())
+    run(llm, FakePlatform(), kb=kb)
+
+    propose_prompt = llm.prompts_seen[-1]
+    # facts get cut to 800 chars - retrieved text must not, or a policy loses its limit
+    assert "REFERENCE DOCUMENTS" in propose_prompt
+    assert "the 1.5x hard limit" in propose_prompt
+
+
+def test_two_searches_both_survive():
+    hits = iter([
+        [{"ref": "POL-PERISH-02", "type": "policy", "similarity": 0.8,
+          "text": '<retrieved_doc ref="POL-PERISH-02">perish</retrieved_doc>'}],
+        [{"ref": "SUP-LACTEO", "type": "supplier", "similarity": 0.7,
+          "text": '<retrieved_doc ref="SUP-LACTEO">lacteo</retrieved_doc>'}],
+    ])
+
+    def kb(query, **f):
+        return {"ok": True, "data": next(hits)}
+
+    llm = FakeLLM([AIMessage(content="", tool_calls=[
+        *gathered_everything().tool_calls[:-1],
+        {"name": "search_knowledge", "args": {"query": "perishable"}, "id": "s1"},
+        {"name": "search_knowledge", "args": {"query": "lacteo"}, "id": "s2"},
+    ])], decision())
+    out = run(llm, FakePlatform(), kb=kb)
+
+    # facts are keyed by tool name, so the second search used to overwrite the first
+    assert any("perish" in t for t in out["retrieved"])
+    assert any("lacteo" in t for t in out["retrieved"])
+
+
+def test_skipping_the_knowledge_search_gets_nudged():
+    reads_only = AIMessage(content="", tool_calls=gathered_everything().tool_calls[:-1])
+    llm = FakeLLM([reads_only], decision())
+    run(llm, FakePlatform())
+
+    nudge = [p for p in llm.prompts_seen if "not checked" in p]
+    assert nudge and "search-knowledge" in nudge[0]
+
+
+def test_citations_end_up_in_the_recorded_explanation():
+    cited = tool_call("record_decision", {
+        "decision": "MODIFY", "qty": 204, "confidence": 0.8,
+        "reasoning": "moq forces a small over-buy", "key_factors": [],
+        "citations": ["POL-PERISH-02", "SUP-LACTEO"]})
+    platform = FakePlatform()
+    out = run(FakeLLM([gathered_everything()], cited), platform)
+
+    assert out["proposal"]["citations"] == ["POL-PERISH-02", "SUP-LACTEO"]
+    assert platform.decisions[0]["explanation"].endswith("Sources: POL-PERISH-02, SUP-LACTEO")
+
+
+def test_every_knowledge_search_is_traced_with_what_came_back():
+    platform = FakePlatform()
+    out = run(FakeLLM([gathered_everything()], decision()), platform)
+
+    step = next(s for s in platform.steps if s["type"] == "RETRIEVAL")
+    assert step["payload"]["query"] == "perishable over-buy"
+    assert step["payload"]["hits"] == [{"ref": "POL-PERISH-02", "similarity": 0.81}]
+    assert out["searches"] == [{"query": "perishable over-buy"}]
+
+
+def test_a_reject_never_records_a_quantity():
+    # the live run said "REJECT 204" - nothing was ordered, but the record lied
+    out = run(FakeLLM([gathered_everything()], decision("REJECT", qty=204)), FakePlatform())
+    assert out["proposal"]["qty"] == 0

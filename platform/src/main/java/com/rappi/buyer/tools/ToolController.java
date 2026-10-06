@@ -14,7 +14,6 @@ import com.rappi.buyer.domain.SupplierProduct;
 import com.rappi.buyer.planner.DemandAnomalyDetector;
 import com.rappi.buyer.planner.ReorderPlan;
 import com.rappi.buyer.planner.ReorderPlanner;
-import com.rappi.buyer.policy.PolicyRetriever;
 import com.rappi.buyer.repo.BudgetRepo;
 import com.rappi.buyer.repo.ForecastRepo;
 import com.rappi.buyer.repo.InventoryRepo;
@@ -70,7 +69,6 @@ public class ToolController {
     private final ReorderPlanner planner;
     private final ConstraintEngine constraints;
     private final DemandAnomalyDetector anomalies;
-    private final PolicyRetriever policyRetriever;
     private final Clock clock;
 
     public ToolController(ProductRepo products, NodeRepo nodes, SupplierRepo suppliers,
@@ -78,7 +76,7 @@ public class ToolController {
                           ForecastRepo forecasts, SalesRepo sales, BudgetRepo budgets,
                           PurchaseOrderRepo purchaseOrders, ReorderPlanner planner,
                           ConstraintEngine constraints, DemandAnomalyDetector anomalies,
-                          PolicyRetriever policyRetriever, Clock clock) {
+                          Clock clock) {
         this.products = products;
         this.nodes = nodes;
         this.suppliers = suppliers;
@@ -91,7 +89,6 @@ public class ToolController {
         this.planner = planner;
         this.constraints = constraints;
         this.anomalies = anomalies;
-        this.policyRetriever = policyRetriever;
         this.clock = clock;
     }
 
@@ -235,12 +232,6 @@ public class ToolController {
             @RequestParam String sku, @RequestParam String nodeId,
             @RequestParam(defaultValue = "60") int lookbackDays) {
         return ToolResponse.ok(anomalies.detect(sku, nodeId, lookbackDays));
-    }
-
-    @GetMapping("/policy-search")
-    public ToolResponse<List<PolicyRetriever.Hit>> policySearch(@RequestParam String query,
-                                                                @RequestParam(defaultValue = "3") int k) {
-        return ToolResponse.ok(policyRetriever.search(query, k));
     }
 
     private static double round1(double v) {

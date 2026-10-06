@@ -8,6 +8,7 @@ from pydantic import BaseModel
 import execute as execute_mod
 import graph
 import llm as llm_mod
+import rag
 from config import cfg
 from platform_client import Platform
 
@@ -37,6 +38,14 @@ def tracer(platform):
     return on_call
 
 
+def remember_run(run_id, sku, node, supplier, rec, decision, qty, outcome, why):
+    rag.remember(
+        f"run:{run_id}",
+        f"Decision for {sku} at {node}: recommended {rec}, decided {decision} {qty} units "
+        f"from {supplier}. Outcome: {outcome}. Reasoning: {(why or '')[:600]}",
+        sku=sku, node_id=node, supplier_id=supplier)
+
+
 @app.on_event("startup")
 def startup():
     """Check the configured model is actually reachable on this key. Two seconds
@@ -54,6 +63,14 @@ def startup():
                       "can use: %s", want, flash)
     except Exception as e:
         log.warning("could not check model availability: %s", e)
+
+    # sync the knowledge docs on every start, so edits to the markdown are picked
+    # up without a separate step. unchanged chunks cost nothing
+    try:
+        done, total = rag.ingest()
+        log.info("knowledge index: %d of %d chunks embedded, rest unchanged", done, total)
+    except Exception as e:
+        log.warning("knowledge index unavailable, the agent runs without it: %s", e)
 
 
 @app.get("/health")
@@ -100,6 +117,11 @@ def resume(run_id: str, req: ResumeRequest):
         llmCalls=model.calls, tokensIn=model.tokens_in, tokensOut=model.tokens_out,
         durationMs=int((time.time() - started) * 1000))
 
+    # same ref as the original run, so this overwrites "waiting for approval"
+    remember_run(run_id, action["sku"], action["nodeId"], action["supplierId"],
+                 action.get("recommendedQty"), action.get("decision"), action.get("qty"),
+                 "approved by a buyer, then " + str(result.get("outcome")), action.get("reason"))
+
     return {
         "runId": run_id,
         "approvalId": req.approval_id,
@@ -131,6 +153,12 @@ def decide(req: DecideRequest):
 
     proposal = state.get("proposal") or {}
     validation = state.get("validation") or {}
+    sit = state.get("situation") or {}
+    if sit.get("sku"):
+        remember_run(req.run_id, sit["sku"], sit.get("node_id"), sit.get("supplier_id"),
+                     req.recommended_qty, proposal.get("decision"), proposal.get("qty"),
+                     (state.get("execution") or {}).get("outcome"), proposal.get("reasoning"))
+
     return {
         "runId": req.run_id,
         "decision": proposal.get("decision"),
@@ -138,6 +166,8 @@ def decide(req: DecideRequest):
         "reasoning": proposal.get("reasoning"),
         "keyFactors": proposal.get("key_factors"),
         "assumptions": proposal.get("assumptions"),
+        "citations": proposal.get("citations") or [],
+        "searches": state.get("searches") or [],
         "confidence": proposal.get("confidence"),
         "validation": validation,
         "execution": state.get("execution"),

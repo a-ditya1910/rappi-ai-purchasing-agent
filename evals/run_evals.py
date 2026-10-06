@@ -96,6 +96,18 @@ def check(case, run):
                         % (pos, it, pos, it)))
 
 
+    if "must_cite" in e:
+        if "citations" not in run:
+            # recorded before the agent had a knowledge base. say so rather than
+            # passing it, or failing a run that never had the chance
+            out.append(("cites its sources", None, "recorded before RAG - re-record with --live"))
+        else:
+            cited = run.get("citations") or []
+            missing = [c for c in e["must_cite"] if c not in cited]
+            out.append(("cites its sources", not missing,
+                        "cited " + (", ".join(cited) or "nothing")
+                        + ("" if not missing else "; missing " + ", ".join(missing))))
+
     if "max_gather_turns" in e:
         turns = run.get("gatherTurns") or 0
         out.append(("batched its reads", turns <= e["max_gather_turns"],
@@ -188,6 +200,7 @@ def main():
     totals = {}
     failures = []
     skipped = []
+    not_yet = []
 
     for case in cases:
         if args.live:
@@ -204,6 +217,9 @@ def main():
                 continue
 
         results = check(case, run)
+        # ok=None means the recording predates the check - shown, not scored
+        pending = [r for r in results if r[1] is None]
+        results = [r for r in results if r[1] is not None]
         passed = sum(1 for _, ok, _ in results if ok)
         mark = "PASS" if passed == len(results) else "FAIL"
 
@@ -222,6 +238,9 @@ def main():
                 totals[dim][0] += 1
             else:
                 failures.append((case["id"], dim, detail))
+        for dim, _, detail in pending:
+            print("     %-22s %-4s %s" % (dim, "--", detail))
+            not_yet.append((case["id"], dim))
 
     print()
     print("=" * 74)
@@ -234,6 +253,12 @@ def main():
         print("FAILURES")
         for cid, dim, detail in failures:
             print("  %-40s %-22s %s" % (cid, dim, detail))
+
+    if not_yet:
+        print()
+        print("NOT SCORED (recorded before the check existed)")
+        for cid, dim in not_yet:
+            print("  %-40s %s" % (cid, dim))
 
     if skipped:
         print()
