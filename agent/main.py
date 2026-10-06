@@ -28,6 +28,15 @@ class DecideRequest(BaseModel):
     po_id: str | None = None
 
 
+def tracer(platform):
+    """Every model call becomes a step in the run's trace, next to the tool calls."""
+    def on_call(label, model, tokens_in, tokens_out, ms):
+        platform.log_step("LLM", label,
+                          {"model": model, "tokensIn": tokens_in, "tokensOut": tokens_out},
+                          latencyMs=ms, tokens=tokens_in + tokens_out)
+    return on_call
+
+
 @app.on_event("startup")
 def startup():
     """Check the configured model is actually reachable on this key. Two seconds
@@ -68,7 +77,7 @@ def resume(run_id: str, req: ResumeRequest):
     """
     started = time.time()
     platform = Platform(run_id)
-    model = llm_mod.Gemini()
+    model = llm_mod.Gemini(on_call=tracer(platform))
 
     action = req.approved_action or {}
     if not action.get("sku"):
@@ -81,12 +90,15 @@ def resume(run_id: str, req: ResumeRequest):
                       {"approvalId": req.approval_id, "approvedAction": action})
 
     result = execute_mod.execute_and_verify(
-        platform, model, run_id, action, plan, action.get("recommendedQty"))
+        platform, model, run_id, action, plan, action.get("recommendedQty"),
+        approval_id=req.approval_id)
 
     platform.record_decision(
-        decision="MODIFY", finalQty=action.get("qty"),
+        decision=action.get("decision") or "MODIFY", finalQty=action.get("qty"),
         explanation="Executed after approval %s. Outcome: %s"
-                    % (req.approval_id, result.get("outcome")))
+                    % (req.approval_id, result.get("outcome")),
+        llmCalls=model.calls, tokensIn=model.tokens_in, tokensOut=model.tokens_out,
+        durationMs=int((time.time() - started) * 1000))
 
     return {
         "runId": run_id,
@@ -104,7 +116,7 @@ def resume(run_id: str, req: ResumeRequest):
 def decide(req: DecideRequest):
     started = time.time()
     platform = Platform(req.run_id)
-    model = llm_mod.Gemini()
+    model = llm_mod.Gemini(on_call=tracer(platform))
 
     compiled = graph.build(platform, model)
     state = compiled.invoke({

@@ -70,4 +70,14 @@ public interface PurchaseOrderRepo extends JpaRepository<PurchaseOrder, String> 
             """)
     int sumIncomingBy(@Param("nodeId") String nodeId, @Param("sku") String sku,
                       @Param("cutoff") LocalDate cutoff);
+
+    /** Every open unit on its way, whenever it lands. This is what inventory.in_transit should equal. */
+    @Query("""
+            select coalesce(sum(coalesce(l.qtyConfirmed, l.qtyOrdered)), 0)
+            from PurchaseOrder po join po.lines l
+            where po.nodeId = :nodeId
+              and l.sku = :sku
+              and po.status in ('SUBMITTED','CONFIRMED','PARTIALLY_CONFIRMED')
+            """)
+    int sumOpenIncoming(@Param("nodeId") String nodeId, @Param("sku") String sku);
 }

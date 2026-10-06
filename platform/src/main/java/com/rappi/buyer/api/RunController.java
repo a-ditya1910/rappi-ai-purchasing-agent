@@ -50,7 +50,8 @@ public class RunController {
             Integer recommendedQty,
             String poId) {}
 
-    public record PostStep(@NotBlank String type, @NotBlank String name, Object payload) {}
+    public record PostStep(@NotBlank String type, @NotBlank String name, Object payload,
+                           Integer latencyMs, Integer tokens) {}
 
     @PostMapping("/runs")
     public Map<String, Object> start(@Valid @RequestBody StartRun req) throws Exception {
@@ -77,6 +78,8 @@ public class RunController {
         step.setType(AgentStep.Type.valueOf(req.type()));
         step.setName(req.name());
         step.setPayload(json.writeValueAsString(req.payload()));
+        step.setLatencyMs(req.latencyMs());
+        step.setTokens(req.tokens());
         step.setCreatedAt(Instant.now(clock));
         steps.save(step);
         return Map.of("ok", true, "seq", step.getSeq());
@@ -93,12 +96,17 @@ public class RunController {
         out.put("finalQty", run.getFinalQty());
         out.put("explanation", run.getExplanation());
         out.put("createdAt", run.getCreatedAt());
+        out.put("llmCalls", run.getLlmCalls());
+        out.put("tokensIn", run.getTokensIn());
+        out.put("tokensOut", run.getTokensOut());
+        out.put("durationMs", run.getDurationMs());
         out.put("steps", steps.findByRunIdOrderBySeq(runId).stream().map(s -> {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("seq", s.getSeq());
             m.put("type", s.getType());
             m.put("name", s.getName());
             m.put("latencyMs", s.getLatencyMs());
+            m.put("tokens", s.getTokens());
             m.put("payload", s.getPayload());
             return m;
         }).toList());

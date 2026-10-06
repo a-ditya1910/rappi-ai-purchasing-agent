@@ -103,6 +103,24 @@ class ConstraintEngineTest {
         assertThat(r.requiresApproval()).isFalse();
     }
 
+    @Test
+    @DisplayName("after the write the order is already in the position and the budget, so it is not counted twice")
+    void postStateDoesNotCountTheOrderTwice() {
+        budget("2500", "1813.80", "400");                    // the 193.80 is already committed
+        ReorderPlan after = plan(884, "57.5", 12, 5);        // 680 + the 204 just ordered
+
+        ValidationReport post = engine.validate(proposal(204, "0.95", 800), after, true);
+
+        assertThat(status(post, "SHELF_LIFE")).isEqualTo(Status.WARN);   // 884/57.5 = 15.4d, 1.28x
+        assertThat(status(post, "BUDGET")).isEqualTo(Status.PASS);
+        assertThat(post.blocking()).isEmpty();
+
+        // the old L2 call: 204 added on top of a position that already had it,
+        // (884+204)/57.5 = 18.9d = 1.58x, a block that was never real
+        ValidationReport old = engine.validate(proposal(204, "0.95", 800), after);
+        assertThat(status(old, "SHELF_LIFE")).isEqualTo(Status.BLOCK);
+    }
+
     // ---- blocks ------------------------------------------------------------
 
     @Test

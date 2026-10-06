@@ -1,16 +1,20 @@
 package com.rappi.buyer.tools;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rappi.buyer.constraints.ConstraintEngine;
 import com.rappi.buyer.constraints.Proposal;
 import com.rappi.buyer.constraints.ValidationReport;
-import com.rappi.buyer.domain.Budget;
+import com.rappi.buyer.domain.Approval;
 import com.rappi.buyer.domain.PoLine;
 import com.rappi.buyer.domain.PoStatus;
 import com.rappi.buyer.domain.Product;
 import com.rappi.buyer.domain.PurchaseOrder;
 import com.rappi.buyer.planner.ReorderPlan;
 import com.rappi.buyer.planner.ReorderPlanner;
+import com.rappi.buyer.repo.ApprovalRepo;
 import com.rappi.buyer.repo.BudgetRepo;
+import com.rappi.buyer.repo.InventoryRepo;
 import com.rappi.buyer.repo.ProductRepo;
 import com.rappi.buyer.repo.PurchaseOrderRepo;
 import com.rappi.buyer.supplier.SupplierMockService;
@@ -28,7 +32,7 @@ import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
-import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -53,22 +57,29 @@ public class PurchaseOrderService {
     private final PurchaseOrderRepo purchaseOrders;
     private final ProductRepo products;
     private final BudgetRepo budgets;
+    private final InventoryRepo inventory;
+    private final ApprovalRepo approvals;
     private final ReorderPlanner planner;
     private final ConstraintEngine constraints;
     private final SupplierMockService supplierApi;
+    private final ObjectMapper json;
     private final EntityManager em;
     private final Clock clock;
 
     public PurchaseOrderService(PurchaseOrderRepo purchaseOrders, ProductRepo products,
-                                BudgetRepo budgets, ReorderPlanner planner,
-                                ConstraintEngine constraints, SupplierMockService supplierApi,
+                                BudgetRepo budgets, InventoryRepo inventory, ApprovalRepo approvals,
+                                ReorderPlanner planner, ConstraintEngine constraints,
+                                SupplierMockService supplierApi, ObjectMapper json,
                                 EntityManager em, Clock clock) {
         this.purchaseOrders = purchaseOrders;
         this.products = products;
         this.budgets = budgets;
+        this.inventory = inventory;
+        this.approvals = approvals;
         this.planner = planner;
         this.constraints = constraints;
         this.supplierApi = supplierApi;
+        this.json = json;
         this.em = em;
         this.clock = clock;
     }
@@ -78,6 +89,15 @@ public class PurchaseOrderService {
                               BigDecimal unitPrice, LocalDate expectedDelivery,
                               String idempotencyKey, Integer recommendedQty,
                               String runId, String createdBy) {
+        return create(sku, nodeId, supplierId, qty, unitPrice, expectedDelivery,
+                idempotencyKey, recommendedQty, runId, createdBy, null);
+    }
+
+    @Transactional
+    public WriteResult create(String sku, String nodeId, String supplierId, int qty,
+                              BigDecimal unitPrice, LocalDate expectedDelivery,
+                              String idempotencyKey, Integer recommendedQty,
+                              String runId, String createdBy, String approvalId) {
 
         // a retry after a timeout must return the original, not make a second one
         Optional<PurchaseOrder> existing = purchaseOrders.findByIdempotencyKey(idempotencyKey);
@@ -91,10 +111,19 @@ public class PurchaseOrderService {
                 expectedDelivery, recommendedQty);
         ValidationReport report = constraints.validate(proposal, plan);
 
-        // the agent does not get to decide whether it is allowed to do this
-        if (report.requiresApproval() || "T3".equals(report.riskTier())) {
+        // a buyer's approval lifts the APPROVAL level checks for exactly the order they
+        // approved. it never lifts a BLOCK - a human can grant authority, not make an
+        // illegal order legal.
+        if (!report.blocking().isEmpty()) {
             return new WriteResult(false, false, null, report,
-                    "tier " + report.riskTier() + ", needs a buyer to approve it");
+                    "blocked: " + String.join("; ", report.blocking()));
+        }
+        if (report.requiresApproval() || "T3".equals(report.riskTier())) {
+            String why = approvalId == null ? "tier " + report.riskTier() + ", needs a buyer to approve it"
+                    : approvalProblem(approvalId, runId, sku, nodeId, supplierId, qty, unitPrice);
+            if (why != null) {
+                return new WriteResult(false, false, null, report, why);
+            }
         }
 
         Product product = products.findById(sku).orElseThrow();
@@ -144,6 +173,9 @@ public class PurchaseOrderService {
         }
 
         commitBudget(nodeId, product.getCategory(), total);
+        if (po.getStatus() != PoStatus.CANCELLED) {
+            moveInTransit(nodeId, sku, conf.confirmedQty());
+        }
 
         return new WriteResult(true, false, po.getId(), report,
                 conf.note() == null ? "confirmed in full" : conf.note());
@@ -166,6 +198,7 @@ public class PurchaseOrderService {
         }
 
         PoLine line = po.getLines().get(0);
+        int openBefore = open(line);
         BigDecimal before = po.getTotalValue();
         line.setQtyOrdered(newQty);
         if (line.getQtyConfirmed() != null) {
@@ -176,6 +209,7 @@ public class PurchaseOrderService {
 
         Product product = products.findById(line.getSku()).orElseThrow();
         commitBudget(po.getNodeId(), product.getCategory(), after.subtract(before));
+        moveInTransit(po.getNodeId(), line.getSku(), open(line) - openBefore);
 
         try {
             purchaseOrders.saveAndFlush(po);
@@ -196,9 +230,15 @@ public class PurchaseOrderService {
                     "STALE_VERSION: expected %d but the order is at %d"
                             .formatted(expectedVersion, po.getVersion()));
         }
+        // cancelling twice used to release the budget twice
+        if (po.getStatus() == PoStatus.CANCELLED || po.getStatus() == PoStatus.RECEIVED) {
+            return new WriteResult(false, false, poId, null, "order is already " + po.getStatus());
+        }
 
-        Product product = products.findById(po.getLines().get(0).getSku()).orElseThrow();
+        PoLine line = po.getLines().get(0);
+        Product product = products.findById(line.getSku()).orElseThrow();
         commitBudget(po.getNodeId(), product.getCategory(), po.getTotalValue().negate());
+        moveInTransit(po.getNodeId(), line.getSku(), -open(line));
 
         po.setStatus(PoStatus.CANCELLED);
         purchaseOrders.saveAndFlush(po);
@@ -218,6 +258,42 @@ public class PurchaseOrderService {
         });
     }
 
+    // in_transit has to move in the same transaction as the order, otherwise the
+    // planner's conflict check sees the two disagree and blocks the next order
+    private void moveInTransit(String nodeId, String sku, int delta) {
+        if (delta == 0) return;
+        inventory.findByNodeIdAndSku(nodeId, sku).ifPresent(i -> {
+            i.setInTransit(Math.max(0, i.getInTransit() + delta));
+            inventory.save(i);
+        });
+    }
+
+    private static int open(PoLine l) {
+        return l.getQtyConfirmed() != null ? l.getQtyConfirmed() : l.getQtyOrdered();
+    }
+
+    private String approvalProblem(String id, String runId, String sku, String nodeId,
+                                   String supplierId, int qty, BigDecimal price) {
+        Approval a = approvals.findById(id).orElse(null);
+        if (a == null) return "unknown approval " + id;
+        if (a.getStatus() != Approval.Status.APPROVED) return "approval " + id + " is " + a.getStatus();
+        if (!a.getRunId().equals(runId)) return "approval " + id + " belongs to another run";
+
+        Map<String, Object> act;
+        try {
+            act = json.readValue(a.getProposedAction(), new TypeReference<>() {});
+        } catch (Exception e) {
+            return "approval " + id + " has an unreadable action";
+        }
+        // the buyer approved one specific order. anything else needs its own approval
+        boolean same = sku.equals(act.get("sku")) && nodeId.equals(act.get("nodeId"))
+                && supplierId.equals(act.get("supplierId"))
+                && act.get("qty") instanceof Number q && q.intValue() == qty
+                && act.get("unitPrice") != null
+                && new BigDecimal(act.get("unitPrice").toString()).compareTo(price) == 0;
+        return same ? null : "approval " + id + " was for a different order";
+    }
+
     /**
      * Re-read straight from mysql.
      *
@@ -234,18 +310,12 @@ public class PurchaseOrderService {
     }
 
     private String nextPoId() {
-        List<PurchaseOrder> all = purchaseOrders.findAll();
-        int max = all.stream()
-                .map(PurchaseOrder::getId)
-                .filter(id -> id.startsWith("PO-"))
-                .mapToInt(id -> {
-                    try {
-                        return Integer.parseInt(id.substring(3));
-                    } catch (NumberFormatException e) {
-                        return 0;
-                    }
-                })
-                .max().orElse(0);
-        return "PO-%04d".formatted(max + 1);
+        // LAST_INSERT_ID(expr) remembers the value for this connection only, and the
+        // UPDATE row-locks the counter, so two concurrent creates can't get the same id
+        em.createNativeQuery(
+                "UPDATE id_counters SET next_val = LAST_INSERT_ID(next_val + 1) WHERE name = 'PO'")
+                .executeUpdate();
+        long n = ((Number) em.createNativeQuery("SELECT LAST_INSERT_ID()").getSingleResult()).longValue();
+        return "PO-%04d".formatted(n);
     }
 }

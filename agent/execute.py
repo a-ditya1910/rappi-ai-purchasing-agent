@@ -28,8 +28,12 @@ def idempotency_key(run_id, action_type, sku, qty):
     return hashlib.sha1(raw.encode()).hexdigest()[:32]
 
 
-def execute_and_verify(platform, llm, run_id, action, plan, recommended_qty=None):
+def execute_and_verify(platform, llm, run_id, action, plan, recommended_qty=None,
+                       approval_id=None):
     """Place the order, then work out whether what happened matches the intent.
+
+    approval_id is set when a buyer approved this exact action. The platform
+    checks it matches before letting a T3 order through.
 
     Returns a dict the caller records: what was done, what was found, what was
     done about it.
@@ -43,7 +47,7 @@ def execute_and_verify(platform, llm, run_id, action, plan, recommended_qty=None
         sku=sku, nodeId=action["nodeId"], supplierId=action["supplierId"],
         qty=qty, unitPrice=action.get("unitPrice") or plan.get("unitPrice"),
         expectedDelivery=action["expectedDelivery"], idempotencyKey=key,
-        recommendedQty=recommended_qty, reason=action.get("reason"))
+        recommendedQty=recommended_qty, reason=action.get("reason"), approvalId=approval_id)
 
     if not res.get("ok"):
         result["outcome"] = "WRITE_FAILED"
@@ -172,7 +176,7 @@ def _choose_repair(llm, verification, mismatches, plan, action, attempt):
                              ("recommendedQty", "targetPosition", "inventoryPosition",
                               "meanDailyDemand", "unitPrice")}, default=str))),
     ]
-    res = llm.invoke(msgs, tools=[choose_repair])
+    res = llm.invoke(msgs, tools=[choose_repair], label="repair")
     calls = getattr(res, "tool_calls", None) or []
     if not calls:
         return {"repair": "escalate",

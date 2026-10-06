@@ -26,12 +26,14 @@ class FakeLLM:
         self.decision = decision
         self.repair = repair
         self.prompts_seen = []
+        self.labels = []
         self.calls = 0
         self.tokens_in = 0
         self.tokens_out = 0
 
-    def invoke(self, messages, tools=None):
+    def invoke(self, messages, tools=None, label=None):
         self.calls += 1
+        self.labels.append(label)
         self.prompts_seen.append("\n".join(str(getattr(m, "content", "")) for m in messages))
         names = [getattr(t, "name", "") for t in (tools or [])]
         if "choose_repair" in names:
@@ -96,9 +98,9 @@ class FakePlatform:
         return {"ok": True, "data": {"approvalId": "AP-1", "status": "PENDING"}}
 
     def record_decision(self, decision, finalQty=None, explanation=None,
-                        validationReport=None):
+                        validationReport=None, **stats):
         self.calls.append("/tools/record-decision")
-        self.decisions.append({"decision": decision, "finalQty": finalQty})
+        self.decisions.append({"decision": decision, "finalQty": finalQty, **stats})
         return {"ok": True, "data": {"ok": True}}
 
     def _ok(self, name, data):
@@ -320,3 +322,89 @@ def test_a_repair_outside_the_allowed_set_escalates():
     out = run(llm, platform)
 
     assert out["execution"]["outcome"] == "ESCALATED"
+
+
+# ---- approvals execute exactly what was approved --------------------------
+
+def test_the_queued_action_carries_the_full_intent():
+    platform = FakePlatform()          # T3
+    run(FakeLLM([gathered_everything()], decision()), platform)
+
+    action = platform.approvals[0]["action"]
+    assert action["recommendedQty"] == 800, "resume needs it to re-run the same checks"
+    assert action["decision"] == "MODIFY", "resume records the decision the agent made"
+
+
+def test_resume_hands_the_approval_id_to_the_write():
+    import execute
+    platform = FakePlatform()
+    action = {"sku": "SKU-MILK-1L", "nodeId": "NODE-BOG-01", "supplierId": "SUP-LACTEO",
+              "qty": 204, "unitPrice": 0.95, "expectedDelivery": "2026-03-15"}
+    out = execute.execute_and_verify(platform, FakeLLM([]), "r1", action, {}, 800,
+                                     approval_id="AP-1")
+
+    assert platform.created[0]["approvalId"] == "AP-1"
+    assert out["outcome"] == "VERIFIED"
+
+
+# ---- observability ---------------------------------------------------------
+
+def test_every_model_call_says_which_node_made_it():
+    llm = FakeLLM([gathered_everything()], decision())
+    run(llm, FakePlatform())
+    assert llm.labels == ["gather", "propose"]
+
+
+def test_run_stats_are_recorded_with_the_decision():
+    llm = FakeLLM([gathered_everything()], decision())
+    platform = FakePlatform()
+    run(llm, platform)
+
+    d = platform.decisions[0]
+    assert d["llmCalls"] == llm.calls == 2
+    assert "tokensIn" in d and "durationMs" in d
+
+
+def test_the_llm_reports_each_call_with_its_tokens(monkeypatch):
+    import llm as llm_mod
+
+    class NoLimit:
+        def acquire(self):
+            pass
+
+    class FakeChat:
+        def invoke(self, messages):
+            return AIMessage(content="ok", usage_metadata={
+                "input_tokens": 120, "output_tokens": 30, "total_tokens": 150})
+
+    monkeypatch.setattr(llm_mod.cfg, "gemini_key", "test-key")
+    seen = []
+    g = llm_mod.Gemini(limiter=NoLimit(), on_call=lambda **kw: seen.append(kw))
+    g._chat = FakeChat()
+
+    g.invoke(["hi"], label="propose")
+
+    assert seen[0]["label"] == "propose"
+    assert (seen[0]["tokens_in"], seen[0]["tokens_out"]) == (120, 30)
+    assert g.tokens_in == 120 and g.calls == 1
+
+
+def test_a_broken_tracer_does_not_break_the_call(monkeypatch):
+    import llm as llm_mod
+
+    class NoLimit:
+        def acquire(self):
+            pass
+
+    class FakeChat:
+        def invoke(self, messages):
+            return AIMessage(content="ok")
+
+    def boom(**kw):
+        raise RuntimeError("platform is down")
+
+    monkeypatch.setattr(llm_mod.cfg, "gemini_key", "test-key")
+    g = llm_mod.Gemini(limiter=NoLimit(), on_call=boom)
+    g._chat = FakeChat()
+
+    assert g.invoke(["hi"]).content == "ok"

@@ -71,6 +71,16 @@ public class ConstraintEngine {
 
     @Transactional(readOnly = true)
     public ValidationReport validate(Proposal p, ReorderPlan plan) {
+        return validate(p, plan, false);
+    }
+
+    /**
+     * postState is for L2 verification, after the order is written. By then the
+     * order is already inside the plan's position and already in the budget's
+     * committed, so cover and budget must not add it on top a second time.
+     */
+    @Transactional(readOnly = true)
+    public ValidationReport validate(Proposal p, ReorderPlan plan, boolean postState) {
         List<Check> checks = new ArrayList<>();
         LocalDate today = LocalDate.now(clock);
 
@@ -86,10 +96,10 @@ public class ConstraintEngine {
         sanity(checks, p, today);
         moqAndPack(checks, p, product, supplier, sp);
         capacity(checks, p, sp);
-        budget(checks, p, product);
+        budget(checks, p, product, postState);
         storage(checks, p, product, node);
         supplierState(checks, supplier);
-        cover(checks, p, product, plan);
+        cover(checks, p, product, plan, postState);
         priceVariance(checks, p);
         duplicatePo(checks, p, plan);
         thresholds(checks, p);
@@ -145,7 +155,7 @@ public class ConstraintEngine {
         }
     }
 
-    private void budget(List<Check> out, Proposal p, Product product) {
+    private void budget(List<Check> out, Proposal p, Product product, boolean postState) {
         Optional<Budget> maybe = budgets.findByNodeIdAndCategoryAndPeriod(
                 p.nodeId(), product.getCategory(), period(LocalDate.now(clock)));
         if (maybe.isEmpty()) {
@@ -154,14 +164,21 @@ public class ConstraintEngine {
         }
         Budget b = maybe.get();
         BigDecimal available = b.available();
-        BigDecimal cost = p.totalValue();
+        // after the write the order is already in committed, so charging it again
+        // here would count it twice. post state only blocks if we are overdrawn.
+        BigDecimal cost = postState ? BigDecimal.ZERO : p.totalValue();
 
         if (cost.compareTo(available) > 0) {
-            out.add(block("BUDGET", "$%s needed but only $%s available in %s"
-                    .formatted(money(cost), money(available), product.getCategory())));
+            out.add(block("BUDGET", postState
+                    ? "budget overdrawn after this order, $%s available in %s"
+                            .formatted(money(available), product.getCategory())
+                    : "$%s needed but only $%s available in %s"
+                            .formatted(money(cost), money(available), product.getCategory())));
             return;
         }
-        out.add(pass("BUDGET", "$%s of $%s available".formatted(money(cost), money(available))));
+        out.add(pass("BUDGET", postState
+                ? "$%s still available after this order".formatted(money(available))
+                : "$%s of $%s available".formatted(money(cost), money(available))));
 
         BigDecimal afterSpend = b.getCommitted().add(b.getSpent()).add(cost);
         if (b.getAllocated().signum() > 0) {
@@ -203,12 +220,16 @@ public class ConstraintEngine {
         }
     }
 
-    private void cover(List<Check> out, Proposal p, Product product, ReorderPlan plan) {
+    private void cover(List<Check> out, Proposal p, Product product, ReorderPlan plan,
+                       boolean postState) {
         if (plan.meanDailyDemand().signum() <= 0) {
             out.add(warn("MAX_COVER", "no demand, cannot compute days of cover"));
             return;
         }
-        BigDecimal coverAfter = BigDecimal.valueOf(plan.inventoryPosition() + p.qty())
+        // post state: the order already sits in the position (this double count is
+        // where the old "1.58x shelf life" L2 result came from)
+        int pos = postState ? plan.inventoryPosition() : plan.inventoryPosition() + p.qty();
+        BigDecimal coverAfter = BigDecimal.valueOf(pos)
                 .divide(plan.meanDailyDemand(), 1, RoundingMode.HALF_UP);
 
         int maxCover = props.maxCoverFor(product.getAbcClass());

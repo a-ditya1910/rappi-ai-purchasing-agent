@@ -33,7 +33,7 @@ import java.time.Instant;
 @NoArgsConstructor
 public class AgentStep {
 
-    public enum Type { THOUGHT, TOOL_CALL, TOOL_RESULT, VALIDATION, DECISION, ERROR, REPAIR }
+    public enum Type { THOUGHT, TOOL_CALL, TOOL_RESULT, VALIDATION, DECISION, ERROR, REPAIR, LLM }
 
     @Id
     @Column(columnDefinition = "char(36)")

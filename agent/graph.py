@@ -78,7 +78,7 @@ def build(platform, llm):
 
         while turns < cfg.max_gather_turns:
             turns += 1
-            res = llm.invoke(msgs, tools=read_tools)
+            res = llm.invoke(msgs, tools=read_tools, label="gather")
             msgs.append(res)
 
             calls = getattr(res, "tool_calls", None) or []
@@ -99,7 +99,7 @@ def build(platform, llm):
             # latitude, but the system does not depend on it having used it well.
             turns += 1
             msgs.append(HumanMessage(prompts.GATHER_GAP.format(missing=", ".join(missing))))
-            res = llm.invoke(msgs, tools=read_tools)
+            res = llm.invoke(msgs, tools=read_tools, label="gather")
             for call in (getattr(res, "tool_calls", None) or []):
                 _run_tool(read_tools, call, state)
 
@@ -154,7 +154,7 @@ def build(platform, llm):
                     analysis="\n".join(plan.get("explanationSteps", [])),
                     recommendation_line=rec_line))]
 
-        res = llm.invoke(msgs, tools=[_decision_tool()])
+        res = llm.invoke(msgs, tools=[_decision_tool()], label="propose")
         state["proposal"] = _extract_decision(res, plan)
         return state
 
@@ -193,15 +193,19 @@ def build(platform, llm):
         if v.get("verdict") == "NOT_APPLICABLE" or qty <= 0:
             platform.record_decision(
                 decision=p.get("decision", "INVESTIGATE"), finalQty=0,
-                explanation=p.get("reasoning"), validationReport=v)
+                explanation=p.get("reasoning"), validationReport=v, **_stats(llm, state))
             state["execution"] = {"outcome": "NO_ACTION"}
             return state
 
+        # the full intent, so an approval later executes exactly this and the
+        # resumed run can record the decision the agent actually made
         action = {
             "sku": sit["sku"], "nodeId": sit["node_id"],
             "supplierId": sit["supplier_id"], "qty": qty,
             "unitPrice": plan.get("unitPrice"),
             "expectedDelivery": _delivery_date(plan),
+            "recommendedQty": sit.get("recommended_qty"),
+            "decision": p.get("decision"),
             "reason": p.get("reasoning"),
         }
 
@@ -215,7 +219,7 @@ def build(platform, llm):
                                       proposedAction=action)
             platform.record_decision(
                 decision=p.get("decision", "ESCALATE"), finalQty=qty,
-                explanation=p.get("reasoning"), validationReport=v)
+                explanation=p.get("reasoning"), validationReport=v, **_stats(llm, state))
             state["execution"] = {"outcome": "NEEDS_APPROVAL", "action": action}
             return state
 
@@ -224,7 +228,7 @@ def build(platform, llm):
         state["execution"] = result
         platform.record_decision(
             decision=p.get("decision", "MODIFY"), finalQty=qty,
-            explanation=p.get("reasoning"), validationReport=v)
+            explanation=p.get("reasoning"), validationReport=v, **_stats(llm, state))
         return state
 
     g = StateGraph(State)
@@ -365,6 +369,11 @@ def _extract_decision(res, plan):
     return {"decision": "INVESTIGATE",
             "reasoning": getattr(res, "content", "") or "no structured decision returned",
             "key_factors": [], "confidence": 0.0, "qty": 0}
+
+
+def _stats(llm, state):
+    return {"llmCalls": llm.calls, "tokensIn": llm.tokens_in, "tokensOut": llm.tokens_out,
+            "durationMs": int((time.time() - state.get("started", time.time())) * 1000)}
 
 
 def _delivery_date(plan):

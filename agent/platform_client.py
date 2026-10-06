@@ -36,7 +36,9 @@ class Platform:
         return self._unwrap(path, r)
 
     def _unwrap(self, path, r):
-        self.calls.append(path)
+        # only tool calls count - the evals assert on these, and trace posts aren't tools
+        if path.startswith("/tools"):
+            self.calls.append(path)
         try:
             payload = r.json()
         except Exception:
@@ -95,12 +97,12 @@ class Platform:
     # ---- writes ----------------------------------------------------------
 
     def create_po(self, sku, nodeId, supplierId, qty, unitPrice, expectedDelivery,
-                  idempotencyKey, recommendedQty=None, reason=None):
+                  idempotencyKey, recommendedQty=None, reason=None, approvalId=None):
         return self.post("/tools/create-po", {
             "sku": sku, "nodeId": nodeId, "supplierId": supplierId, "qty": qty,
             "unitPrice": unitPrice, "expectedDelivery": expectedDelivery,
             "idempotencyKey": idempotencyKey, "recommendedQty": recommendedQty,
-            "reason": reason,
+            "reason": reason, "approvalId": approvalId,
         })
 
     def amend_po(self, poId, newQty, expectedVersion, reason):
@@ -116,10 +118,12 @@ class Platform:
         return self.post("/tools/request-approval", {
             "reason": reason, "riskTier": riskTier, "proposedAction": proposedAction})
 
-    def record_decision(self, decision, finalQty=None, explanation=None, validationReport=None):
-        return self.post("/tools/record-decision", {
-            "decision": decision, "finalQty": finalQty,
-            "explanation": explanation, "validationReport": validationReport})
+    def record_decision(self, decision, finalQty=None, explanation=None, validationReport=None,
+                        **stats):
+        body = {"decision": decision, "finalQty": finalQty,
+                "explanation": explanation, "validationReport": validationReport}
+        body.update(stats)     # llmCalls, tokensIn, tokensOut, durationMs
+        return self.post("/tools/record-decision", body)
 
     def demand_anomaly(self, sku, nodeId, lookbackDays=60):
         return self.get("/tools/demand-anomaly", sku=sku, nodeId=nodeId, lookbackDays=lookbackDays)
@@ -129,8 +133,9 @@ class Platform:
 
     # ---- run bookkeeping -------------------------------------------------
 
-    def log_step(self, type_, name, payload=None):
+    def log_step(self, type_, name, payload=None, latencyMs=None, tokens=None):
         """Agent side events - the model's own reasoning. Tool calls trace
         themselves through the interceptor."""
         return self.post(f"/runs/{self.run_id}/steps",
-                         {"type": type_, "name": name, "payload": payload or {}})
+                         {"type": type_, "name": name, "payload": payload or {},
+                          "latencyMs": latencyMs, "tokens": tokens})

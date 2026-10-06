@@ -98,10 +98,15 @@ public class ReorderPlanner {
         // Only POs landing inside the protection period cover demand inside it.
         // Anything arriving later is not help we can count on.
         int derivedInTransit = purchaseOrders.sumIncomingBy(nodeId, sku, today.plusDays(protection));
-        if (derivedInTransit != inv.getInTransit()) {
-            warns.add(("DATA_CONFLICT: inventory.in_transit is %d but open purchase orders arriving "
-                    + "within %d days sum to %d. Not ordering against a position we cannot trust.")
-                    .formatted(inv.getInTransit(), protection, derivedInTransit));
+
+        // the stored column is every open unit on its way, so compare it with every
+        // open PO. comparing it with the in-window sum flagged any PO landing later
+        // as a conflict.
+        int allIncoming = purchaseOrders.sumOpenIncoming(nodeId, sku);
+        if (allIncoming != inv.getInTransit()) {
+            warns.add(("DATA_CONFLICT: inventory.in_transit is %d but open purchase orders "
+                    + "sum to %d. Not ordering against a position we cannot trust.")
+                    .formatted(inv.getInTransit(), allIncoming));
         }
 
         int onHand = Math.max(0, inv.getOnHand());

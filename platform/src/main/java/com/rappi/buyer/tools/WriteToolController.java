@@ -67,7 +67,11 @@ public class WriteToolController {
             @NotBlank String decision,
             Integer finalQty,
             String explanation,
-            Object validationReport) {}
+            Object validationReport,
+            Integer llmCalls,
+            Integer tokensIn,
+            Integer tokensOut,
+            Long durationMs) {}
 
     /**
      * Park a decision the agent is not allowed to make. The action is stored
@@ -115,6 +119,10 @@ public class WriteToolController {
         if (req.validationReport() != null) {
             run.setValidationReport(json.writeValueAsString(req.validationReport()));
         }
+        if (req.llmCalls() != null) run.setLlmCalls(req.llmCalls());
+        if (req.tokensIn() != null) run.setTokensIn(req.tokensIn());
+        if (req.tokensOut() != null) run.setTokensOut(req.tokensOut());
+        if (req.durationMs() != null) run.setDurationMs(req.durationMs());
         if (run.getStatus() == AgentRun.Status.RUNNING) {
             run.setStatus(AgentRun.Status.COMPLETED);
         }
@@ -132,7 +140,8 @@ public class WriteToolController {
             @NotNull LocalDate expectedDelivery,
             @NotBlank String idempotencyKey,
             Integer recommendedQty,
-            String reason) {}
+            String reason,
+            String approvalId) {}
 
     public record AmendPo(
             @NotBlank String poId,
@@ -147,7 +156,7 @@ public class WriteToolController {
                                                     @RequestHeader("X-Run-Id") String runId) {
         WriteResult res = orders.create(req.sku(), req.nodeId(), req.supplierId(), req.qty(),
                 req.unitPrice(), req.expectedDelivery(), req.idempotencyKey(),
-                req.recommendedQty(), runId, "agent");
+                req.recommendedQty(), runId, "agent", req.approvalId());
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("executed", res.executed());

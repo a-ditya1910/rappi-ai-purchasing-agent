@@ -124,6 +124,13 @@ public class ApprovalController {
             return ResponseEntity.ok(out);
         }
 
+        // back to RUNNING, otherwise record-decision never completes the run and it
+        // sits at NEEDS_APPROVAL forever after being approved
+        runs.findById(a.getRunId()).ifPresent(r -> {
+            r.setStatus(AgentRun.Status.RUNNING);
+            runs.save(r);
+        });
+
         // hand it back to the agent to execute and verify
         try {
             Map<?, ?> res = agent.post()
@@ -137,8 +144,20 @@ public class ApprovalController {
             out.put("result", res);
         } catch (Exception e) {
             log.warn("could not resume run {}", a.getRunId(), e);
+            // put it back in the queue so the buyer can retry. safe even if the agent
+            // got halfway, the idempotency key stops a second order being created.
+            a.setStatus(Approval.Status.PENDING);
+            a.setDecidedBy(null);
+            a.setDecidedAt(null);
+            approvals.save(a);
+            runs.findById(a.getRunId()).ifPresent(r -> {
+                r.setStatus(AgentRun.Status.NEEDS_APPROVAL);
+                runs.save(r);
+            });
+            out.put("status", a.getStatus());
             out.put("resumed", false);
-            out.put("error", "approved, but the agent could not be reached: " + e.getMessage());
+            out.put("error", "the agent could not be reached, approval is back in the queue: "
+                    + e.getMessage());
         }
         return ResponseEntity.ok(out);
     }

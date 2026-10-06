@@ -123,7 +123,7 @@ public class Verifier {
                 Math.max(confirmed, 1), line.getUnitPrice(), po.getExpectedDelivery(),
                 intended.recommendedQty());
 
-        ValidationReport post = constraints.validate(asBuilt, after);
+        ValidationReport post = constraints.validate(asBuilt, after, true);
         boolean legal = !post.blocking().stream()
                 // the order we just placed is obviously in the window now, that is
                 // not a violation we created
