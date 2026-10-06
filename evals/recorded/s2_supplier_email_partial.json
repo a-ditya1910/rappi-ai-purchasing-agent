@@ -1,0 +1,553 @@
+{
+  "runId": "fdd9106a-2c9e-4258-af8c-786e8a075fec",
+  "decision": "MODIFY",
+  "qty": 170,
+  "supplierId": "SUP-ANDINA",
+  "reasoning": "Per POL-PARTIAL-01 and the replenishment playbook, I must first amend PO-0031 to the confirmed quantity of 250 units to release the budget for the unconfirmed 250 units. \n\nRegarding the shortfall: The current position is 410 units. The 14-day demand forecast is 618.2 units. With the confirmed 250 units arriving on 2026-03-14, the node will face a stockout within the 14-day horizon. I need to order the remainder. The planner's calculation for a 11-day protection period suggests a need of 170 units to reach the target position. Ordering 170 units from SUP-ANDINA will cover the projected shortfall while adhering to the case pack constraint of 10.",
+  "keyFactors": [
+    "PO-0031 is partially confirmed (250 units confirmed vs 500 ordered)",
+    "POL-PARTIAL-01 requires amending the PO to the confirmed quantity to release budget",
+    "Projected stockout analysis: Current position 410, 14-day demand 618.2. Shortfall expected.",
+    "SUP-ANDINA is the preferred supplier based on price and lead time."
+  ],
+  "assumptions": null,
+  "citations": [],
+  "searches": [
+    {
+      "query": "partial delivery policy playbook"
+    }
+  ],
+  "confidence": null,
+  "validation": {
+    "verdict": "PASS_WITH_WARNINGS",
+    "riskTier": "T2",
+    "checks": [
+      {
+        "id": "SANITY",
+        "status": "PASS",
+        "detail": "quantity, price and delivery date are sane"
+      },
+      {
+        "id": "MOQ",
+        "status": "PASS",
+        "detail": "170 meets the 100 minimum"
+      },
+      {
+        "id": "CASE_PACK",
+        "status": "PASS",
+        "detail": "170 = 17 x 10"
+      },
+      {
+        "id": "MAX_CAPACITY",
+        "status": "PASS",
+        "detail": "170 within the 250 daily capacity"
+      },
+      {
+        "id": "BUDGET",
+        "status": "PASS",
+        "detail": "$663.00 of $6125.00 available"
+      },
+      {
+        "id": "STORAGE",
+        "status": "PASS",
+        "detail": "170 units need 153,000 cm3 of 6,000,000 cm3 free"
+      },
+      {
+        "id": "SUPPLIER_ACTIVE",
+        "status": "PASS",
+        "detail": "SUP-ANDINA is active"
+      },
+      {
+        "id": "SUPPLIER_RELIABILITY",
+        "status": "PASS",
+        "detail": "reliability 0.880"
+      },
+      {
+        "id": "MAX_COVER",
+        "status": "PASS",
+        "detail": "13.4 days of cover, limit 30"
+      },
+      {
+        "id": "PRICE_VARIANCE",
+        "status": "PASS",
+        "detail": "0.0% versus the last paid 3.90"
+      },
+      {
+        "id": "DUPLICATE_PO",
+        "status": "WARN",
+        "detail": "PO-0031 already covers 250 units of this sku, arriving 2026-03-14. The 170 proposed is the residual need after counting it. Consider amending that PO rather than raising another."
+      },
+      {
+        "id": "VALUE_THRESHOLD",
+        "status": "PASS",
+        "detail": "$663.00 is within the $1000.00 limit"
+      },
+      {
+        "id": "DATA_CONFLICT",
+        "status": "PASS",
+        "detail": "in transit matches the open purchase orders"
+      },
+      {
+        "id": "LEAD_TIME_FEASIBLE",
+        "status": "PASS",
+        "detail": "9.5 days of cover against a 4 day lead time"
+      }
+    ],
+    "blocking": [],
+    "requiresApproval": false
+  },
+  "execution": {
+    "action": {
+      "sku": "SKU-COFFEE-500G",
+      "nodeId": "NODE-BOG-01",
+      "supplierId": "SUP-ANDINA",
+      "qty": 170,
+      "unitPrice": 3.9,
+      "expectedDelivery": "2026-03-14",
+      "recommendedQty": null,
+      "decision": "MODIFY",
+      "reason": "Per POL-PARTIAL-01 and the replenishment playbook, I must first amend PO-0031 to the confirmed quantity of 250 units to release the budget for the unconfirmed 250 units. \n\nRegarding the shortfall: The current position is 410 units. The 14-day demand forecast is 618.2 units. With the confirmed 250 units arriving on 2026-03-14, the node will face a stockout within the 14-day horizon. I need to order the remainder. The planner's calculation for a 11-day protection period suggests a need of 170 units to reach the target position. Ordering 170 units from SUP-ANDINA will cover the projected shortfall while adhering to the case pack constraint of 10."
+    },
+    "attempts": [
+      {
+        "executed": true,
+        "idempotent": false,
+        "poId": "PO-0060",
+        "message": "delivery slipped 3 days",
+        "validation": {
+          "verdict": "PASS_WITH_WARNINGS",
+          "riskTier": "T2",
+          "checks": [
+            {
+              "id": "SANITY",
+              "status": "PASS",
+              "detail": "quantity, price and delivery date are sane"
+            },
+            {
+              "id": "MOQ",
+              "status": "PASS",
+              "detail": "170 meets the 100 minimum"
+            },
+            {
+              "id": "CASE_PACK",
+              "status": "PASS",
+              "detail": "170 = 17 x 10"
+            },
+            {
+              "id": "MAX_CAPACITY",
+              "status": "PASS",
+              "detail": "170 within the 250 daily capacity"
+            },
+            {
+              "id": "BUDGET",
+              "status": "PASS",
+              "detail": "$663.00 of $6125.00 available"
+            },
+            {
+              "id": "STORAGE",
+              "status": "PASS",
+              "detail": "170 units need 153,000 cm3 of 6,000,000 cm3 free"
+            },
+            {
+              "id": "SUPPLIER_ACTIVE",
+              "status": "PASS",
+              "detail": "SUP-ANDINA is active"
+            },
+            {
+              "id": "SUPPLIER_RELIABILITY",
+              "status": "PASS",
+              "detail": "reliability 0.880"
+            },
+            {
+              "id": "MAX_COVER",
+              "status": "PASS",
+              "detail": "13.4 days of cover, limit 30"
+            },
+            {
+              "id": "PRICE_VARIANCE",
+              "status": "PASS",
+              "detail": "0.0% versus the last paid 3.90"
+            },
+            {
+              "id": "DUPLICATE_PO",
+              "status": "WARN",
+              "detail": "PO-0031 already covers 250 units of this sku, arriving 2026-03-14. The 170 proposed is the residual need after counting it. Consider amending that PO rather than raising another."
+            },
+            {
+              "id": "VALUE_THRESHOLD",
+              "status": "PASS",
+              "detail": "$663.00 is within the $1000.00 limit"
+            },
+            {
+              "id": "DATA_CONFLICT",
+              "status": "PASS",
+              "detail": "in transit matches the open purchase orders"
+            },
+            {
+              "id": "LEAD_TIME_FEASIBLE",
+              "status": "PASS",
+              "detail": "9.5 days of cover against a 4 day lead time"
+            }
+          ],
+          "blocking": [],
+          "requiresApproval": false
+        },
+        "verification": {
+          "poId": "PO-0060",
+          "outcome": "MISMATCH",
+          "diffs": [
+            {
+              "level": "L1",
+              "field": "qtyOrdered",
+              "intended": "170",
+              "actual": "170",
+              "ok": true
+            },
+            {
+              "level": "L1",
+              "field": "qtyConfirmed",
+              "intended": "170",
+              "actual": "170",
+              "ok": true
+            },
+            {
+              "level": "L1",
+              "field": "unitPrice",
+              "intended": "3.9",
+              "actual": "3.9000",
+              "ok": true
+            },
+            {
+              "level": "L1",
+              "field": "supplierId",
+              "intended": "SUP-ANDINA",
+              "actual": "SUP-ANDINA",
+              "ok": true
+            },
+            {
+              "level": "L1",
+              "field": "expectedDelivery",
+              "intended": "2026-03-14",
+              "actual": "2026-03-17",
+              "ok": false
+            },
+            {
+              "level": "L2",
+              "field": "postStateLegal",
+              "intended": "no blocking checks",
+              "actual": "none",
+              "ok": true
+            },
+            {
+              "level": "L3",
+              "field": "stockoutDays",
+              "intended": "0",
+              "actual": "1",
+              "ok": false
+            },
+            {
+              "level": "L3",
+              "field": "endingPosition",
+              "intended": "<= 657",
+              "actual": "102",
+              "ok": true
+            },
+            {
+              "level": "L3",
+              "field": "daysOfCover",
+              "intended": "within limits",
+              "actual": "2.4",
+              "ok": true
+            }
+          ],
+          "notes": [
+            "still short: 1 days below zero from 2026-03-13",
+            "2026-03-13: -42 demand -> position -8",
+            "2026-03-14: +250 arrives, -50 demand -> position 192",
+            "2026-03-17: +170 arrives, -42 demand -> position 228"
+          ]
+        },
+        "verified": false
+      }
+    ],
+    "repairs": [
+      {
+        "repair": "escalate",
+        "reasoning": "The order resulted in a stockout on 2026-03-13 because the delivery was delayed to 2026-03-17. Since the goal of 0 stockout days was not met, I cannot accept this as is. Amending the quantity on the existing order will not fix the timing issue (the delay to 2026-03-17). Splitting or cancelling and recreating are necessary to address the stockout. Given the urgency and the need to correct the delivery timeline, I am escalating this to the buyer to determine the best path forward."
+      }
+    ],
+    "poId": "PO-0060",
+    "verification": {
+      "poId": "PO-0060",
+      "outcome": "MISMATCH",
+      "diffs": [
+        {
+          "level": "L1",
+          "field": "qtyOrdered",
+          "intended": "170",
+          "actual": "170",
+          "ok": true
+        },
+        {
+          "level": "L1",
+          "field": "qtyConfirmed",
+          "intended": "170",
+          "actual": "170",
+          "ok": true
+        },
+        {
+          "level": "L1",
+          "field": "unitPrice",
+          "intended": "3.9",
+          "actual": "3.9000",
+          "ok": true
+        },
+        {
+          "level": "L1",
+          "field": "supplierId",
+          "intended": "SUP-ANDINA",
+          "actual": "SUP-ANDINA",
+          "ok": true
+        },
+        {
+          "level": "L1",
+          "field": "expectedDelivery",
+          "intended": "2026-03-14",
+          "actual": "2026-03-17",
+          "ok": false
+        },
+        {
+          "level": "L2",
+          "field": "postStateLegal",
+          "intended": "no blocking checks",
+          "actual": "none",
+          "ok": true
+        },
+        {
+          "level": "L3",
+          "field": "stockoutDays",
+          "intended": "0",
+          "actual": "1",
+          "ok": false
+        },
+        {
+          "level": "L3",
+          "field": "endingPosition",
+          "intended": "<= 657",
+          "actual": "102",
+          "ok": true
+        },
+        {
+          "level": "L3",
+          "field": "daysOfCover",
+          "intended": "within limits",
+          "actual": "2.4",
+          "ok": true
+        }
+      ],
+      "notes": [
+        "still short: 1 days below zero from 2026-03-13",
+        "2026-03-13: -42 demand -> position -8",
+        "2026-03-14: +250 arrives, -50 demand -> position 192",
+        "2026-03-17: +170 arrives, -42 demand -> position 228"
+      ]
+    },
+    "outcome": "ESCALATED"
+  },
+  "analysis": {
+    "sku": "SKU-COFFEE-500G",
+    "nodeId": "NODE-BOG-01",
+    "supplierId": "SUP-ANDINA",
+    "onHand": 180,
+    "reserved": 20,
+    "inTransit": 250,
+    "inventoryPosition": 410,
+    "leadTimeDays": 4,
+    "reviewPeriodDays": 7,
+    "protectionPeriodDays": 11,
+    "expectedDemand": 477.12,
+    "meanDailyDemand": 43.37,
+    "safetyStock": 94,
+    "serviceLevel": 0.98,
+    "z": 2.05,
+    "targetPosition": 572,
+    "rawNeed": 162,
+    "afterMoq": 162,
+    "afterCasePack": 170,
+    "maxAffordable": 1570,
+    "maxStorable": 6660,
+    "recommendedQty": 170,
+    "daysOfCoverNow": 9.5,
+    "daysOfCoverAfter": 13.4,
+    "unitPrice": 3.9,
+    "estimatedCost": 663.0,
+    "explanationSteps": [
+      "Protection period = 4 lead time + 7 review period = 11 days",
+      "Position = 180 on hand - 20 reserved + 250 arriving within 11 days = 410",
+      "Expected demand over 11 days = 477.1 units (mean 43.4/day)",
+      "Safety stock = 2.05 z x sqrt(11 x 9.0^2 + (43.4 x 0.8)^2) = 94 units",
+      "Target position = 572, current 410, so raw need = 162",
+      "Rounded up to 170 to fit case pack of 10"
+    ],
+    "warnings": []
+  },
+  "options": [
+    {
+      "supplierId": "SUP-ANDINA",
+      "name": "Cafe Andina",
+      "usable": true,
+      "note": null,
+      "score": 0.024,
+      "parts": {
+        "price": 0.0,
+        "leadTime": 0.0,
+        "reliability": 0.12,
+        "moq": 0.0
+      },
+      "maxDailyCapacity": 250,
+      "plan": {
+        "sku": "SKU-COFFEE-500G",
+        "nodeId": "NODE-BOG-01",
+        "supplierId": "SUP-ANDINA",
+        "onHand": 180,
+        "reserved": 20,
+        "inTransit": 250,
+        "inventoryPosition": 410,
+        "leadTimeDays": 4,
+        "reviewPeriodDays": 7,
+        "protectionPeriodDays": 11,
+        "expectedDemand": 477.12,
+        "meanDailyDemand": 43.37,
+        "safetyStock": 94,
+        "serviceLevel": 0.98,
+        "z": 2.05,
+        "targetPosition": 572,
+        "rawNeed": 162,
+        "afterMoq": 162,
+        "afterCasePack": 170,
+        "maxAffordable": 1570,
+        "maxStorable": 6660,
+        "recommendedQty": 170,
+        "daysOfCoverNow": 9.5,
+        "daysOfCoverAfter": 13.4,
+        "unitPrice": 3.9,
+        "estimatedCost": 663.0,
+        "explanationSteps": [
+          "Protection period = 4 lead time + 7 review period = 11 days",
+          "Position = 180 on hand - 20 reserved + 250 arriving within 11 days = 410",
+          "Expected demand over 11 days = 477.1 units (mean 43.4/day)",
+          "Safety stock = 2.05 z x sqrt(11 x 9.0^2 + (43.4 x 0.8)^2) = 94 units",
+          "Target position = 572, current 410, so raw need = 162",
+          "Rounded up to 170 to fit case pack of 10"
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "supplierId": "SUP-CAFEBR",
+      "name": "Cafe Brasil Import",
+      "usable": true,
+      "note": null,
+      "score": 0.063,
+      "parts": {
+        "price": 0.128,
+        "leadTime": 0.0,
+        "reliability": 0.09,
+        "moq": 0.0
+      },
+      "maxDailyCapacity": 2000,
+      "plan": {
+        "sku": "SKU-COFFEE-500G",
+        "nodeId": "NODE-BOG-01",
+        "supplierId": "SUP-CAFEBR",
+        "onHand": 180,
+        "reserved": 20,
+        "inTransit": 250,
+        "inventoryPosition": 410,
+        "leadTimeDays": 9,
+        "reviewPeriodDays": 7,
+        "protectionPeriodDays": 16,
+        "expectedDemand": 702.24,
+        "meanDailyDemand": 43.89,
+        "safetyStock": 154,
+        "serviceLevel": 0.98,
+        "z": 2.05,
+        "targetPosition": 857,
+        "rawNeed": 447,
+        "afterMoq": 447,
+        "afterCasePack": 450,
+        "maxAffordable": 1390,
+        "maxStorable": 6660,
+        "recommendedQty": 450,
+        "daysOfCoverNow": 9.3,
+        "daysOfCoverAfter": 19.6,
+        "unitPrice": 4.4,
+        "estimatedCost": 1980.0,
+        "explanationSteps": [
+          "Protection period = 9 lead time + 7 review period = 16 days",
+          "Position = 180 on hand - 20 reserved + 250 arriving within 16 days = 410",
+          "Expected demand over 16 days = 702.2 units (mean 43.9/day)",
+          "Safety stock = 2.05 z x sqrt(16 x 9.0^2 + (43.9 x 1.5)^2) = 154 units",
+          "Target position = 857, current 410, so raw need = 447",
+          "Rounded up to 450 to fit case pack of 10"
+        ],
+        "warnings": []
+      }
+    }
+  ],
+  "toolsCalled": [
+    "/tools/supplier-event",
+    "/tools/po/PO-0031",
+    "/tools/inventory-position",
+    "/tools/demand-forecast",
+    "/tools/sales-actuals",
+    "/tools/suppliers",
+    "/tools/product",
+    "/tools/supplier-options",
+    "/tools/validate-purchase",
+    "/tools/create-po",
+    "/tools/request-approval",
+    "/tools/record-decision"
+  ],
+  "gatherTurns": 1,
+  "llmCalls": 4,
+  "tokensIn": 5170,
+  "tokensOut": 771,
+  "durationMs": 29968,
+  "errors": [],
+  "reading": {
+    "summary": "The supplier can only ship 250 units of the 500 units ordered, arriving on 2026-03-14.",
+    "po_id": "PO-0031",
+    "confirmed_delivery": "2026-03-14",
+    "confirmed_qty": 250,
+    "kind": "PARTIAL"
+  },
+  "event": {
+    "applied": true,
+    "duplicate": false,
+    "eventId": 7,
+    "poId": "PO-0031",
+    "sku": "SKU-COFFEE-500G",
+    "nodeId": "NODE-BOG-01",
+    "supplierId": "SUP-ANDINA",
+    "before": {
+      "status": "SUBMITTED",
+      "qtyOrdered": 500,
+      "qtyConfirmed": null,
+      "unitPrice": 3.9,
+      "expectedDelivery": "2026-03-14",
+      "totalValue": 1950.0
+    },
+    "after": {
+      "status": "PARTIALLY_CONFIRMED",
+      "qtyOrdered": 500,
+      "qtyConfirmed": 250,
+      "unitPrice": 3.9,
+      "expectedDelivery": "2026-03-14",
+      "totalValue": 975.0
+    },
+    "shortfall": 250
+  },
+  "_recordedAt": "2026-10-06T08:46:17+00:00",
+  "_model": "unknown"
+}

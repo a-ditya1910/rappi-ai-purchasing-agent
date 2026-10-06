@@ -26,12 +26,14 @@ class FakeLLM:
         self.decision = decision
         self.repair = repair
         self.prompts_seen = []
+        self.labels = []
         self.calls = 0
         self.tokens_in = 0
         self.tokens_out = 0
 
-    def invoke(self, messages, tools=None):
+    def invoke(self, messages, tools=None, label=None):
         self.calls += 1
+        self.labels.append(label)
         self.prompts_seen.append("\n".join(str(getattr(m, "content", "")) for m in messages))
         names = [getattr(t, "name", "") for t in (tools or [])]
         if "choose_repair" in names:
@@ -39,6 +41,20 @@ class FakeLLM:
         if "record_decision" in names:
             return self.decision or AIMessage(content="no decision was recorded")
         return self.gather.pop(0) if self.gather else AIMessage(content="done gathering")
+
+
+class FakeKB:
+    """Stands in for rag.search. Records every query it was asked."""
+
+    def __init__(self, hits=None):
+        self.queries = []
+        self.hits = hits if hits is not None else [
+            {"ref": "POL-PERISH-02", "type": "policy", "similarity": 0.81,
+             "text": '<retrieved_doc ref="POL-PERISH-02">up to 1.25 times shelf life</retrieved_doc>'}]
+
+    def __call__(self, query, **filters):
+        self.queries.append((query, filters))
+        return {"ok": True, "data": list(self.hits)}
 
 
 class FakePlatform:
@@ -49,6 +65,7 @@ class FakePlatform:
         self.amended = []
         self.approvals = []
         self.decisions = []
+        self.steps = []
         self._validation = validation or {"verdict": "NEEDS_APPROVAL", "riskTier": "T3",
                                           "checks": [], "blocking": [],
                                           "requiresApproval": True}
@@ -85,6 +102,12 @@ class FakePlatform:
         self.amended.append({"poId": poId, "newQty": newQty})
         return {"ok": True, "data": {"executed": True, "poId": poId}}
 
+    def verify_po(self, poId, action):
+        self.calls.append("/tools/verify-po")
+        self.reverified = action
+        return {"ok": True, "data": dict(getattr(self, "_reverify", {"outcome": "VERIFIED",
+                                                                   "diffs": [], "notes": []}))}
+
     def cancel_po(self, poId, expectedVersion, reason):
         self.calls.append("/tools/cancel-po")
         return {"ok": True, "data": {"executed": True, "poId": poId}}
@@ -96,10 +119,14 @@ class FakePlatform:
         return {"ok": True, "data": {"approvalId": "AP-1", "status": "PENDING"}}
 
     def record_decision(self, decision, finalQty=None, explanation=None,
-                        validationReport=None):
+                        validationReport=None, **stats):
         self.calls.append("/tools/record-decision")
-        self.decisions.append({"decision": decision, "finalQty": finalQty})
+        self.decisions.append({"decision": decision, "finalQty": finalQty,
+                               "explanation": explanation, **stats})
         return {"ok": True, "data": {"ok": True}}
+
+    def log_step(self, type_, name, payload=None, latencyMs=None, tokens=None):
+        self.steps.append({"type": type_, "name": name, "payload": payload})
 
     def _ok(self, name, data):
         self.calls.append(name)
@@ -114,6 +141,32 @@ class FakePlatform:
     def budget(self, nodeId, category):           return self._ok("/tools/budget", {"available": 480})
     def storage(self, nodeId, sku=None):          return self._ok("/tools/storage", {"freeCm3": 6000000})
     def po(self, poId):                           return self._ok("/tools/po", {"poId": poId, "version": 1})
+    def demand_anomaly(self, sku, nodeId, l=60):  return self._ok("/tools/demand-anomaly", {"verdict": "REAL"})
+
+    def transfer_options(self, sku, nodeId):
+        return self._ok("/tools/transfer-options", {
+            "need": 189, "steps": ["NODE-BOG-01 needs 189"],
+            "options": [
+                {"fromNode": "NODE-BOG-02", "qty": 188, "spare": 1305, "keep": 95, "usable": True,
+                 "steps": ["NODE-BOG-02 has 1400, must keep 95"]},
+                {"fromNode": "NODE-MEX-01", "qty": 0, "usable": False, "note": "no forecast"}]})
+
+    def create_transfer(self, sku, fromNode, toNode, qty, idempotencyKey, approvalId=None):
+        self.calls.append("/tools/create-transfer")
+        self.transfers = getattr(self, "transfers", []) + [{"qty": qty, "approvalId": approvalId}]
+        return {"ok": True, "data": {"executed": True, "idempotent": False, "transferId": "TO-0001",
+                                     "verification": {"outcome": "VERIFIED", "diffs": [], "notes": []}}}
+
+    def supplier_options(self, sku, nodeId):
+        def opt(sid, qty, price, lead, score):
+            return {"supplierId": sid, "usable": True, "score": score, "note": None,
+                    "parts": {"price": 0.0}, "maxDailyCapacity": 2000,
+                    "plan": {"recommendedQty": qty, "rawNeed": qty, "unitPrice": price,
+                             "estimatedCost": qty * price, "leadTimeDays": lead,
+                             "explanationSteps": [f"plan for {sid}"], "warnings": []}}
+        return self._ok("/tools/supplier-options", [
+            opt("SUP-ANDINA", 150, 3.90, 4, 0.04), opt("SUP-CAFEBR", 400, 4.40, 9, 0.09),
+            {"supplierId": "SUP-GONE", "usable": False, "note": "inactive, cannot order"}])
 
 
 def tool_call(name, args, cid="1"):
@@ -130,6 +183,7 @@ def gathered_everything():
         {"name": "get_suppliers", "args": {"sku": "SKU-MILK-1L"}, "id": "d"},
         {"name": "get_budget", "args": {"node_id": "NODE-BOG-01", "category": "dairy"}, "id": "e"},
         {"name": "get_storage", "args": {"node_id": "NODE-BOG-01"}, "id": "f"},
+        {"name": "search_knowledge", "args": {"query": "perishable over-buy"}, "id": "g"},
     ])
 
 
@@ -149,8 +203,8 @@ def situation(**over):
             "facts": {}, "errors": []}
 
 
-def run(llm, platform, state=None):
-    return graph.build(platform, llm).invoke(state or situation())
+def run(llm, platform, state=None, kb=None):
+    return graph.build(platform, llm, kb or FakeKB()).invoke(state or situation())
 
 
 # ---- the ordering that stops anchoring ------------------------------------
@@ -207,8 +261,16 @@ def test_preflight_runs_even_when_the_model_is_confident():
     assert platform.validated["recommendedQty"] == 800
 
 
+def covered_plan():
+    """Position already covers the target - nothing needed, nothing to order."""
+    return {"recommendedQty": 0, "rawNeed": 0, "inventoryPosition": 900,
+            "leadTimeDays": 5, "unitPrice": 0.95,
+            "explanationSteps": ["Position already covers the target, nothing to order"],
+            "warnings": []}
+
+
 def test_no_purchase_means_no_validation_call():
-    platform = FakePlatform()
+    platform = FakePlatform(plan=covered_plan())
     out = run(FakeLLM([gathered_everything()], decision("INVESTIGATE", qty=0)), platform)
 
     assert out["validation"]["verdict"] == "NOT_APPLICABLE"
@@ -320,3 +382,435 @@ def test_a_repair_outside_the_allowed_set_escalates():
     out = run(llm, platform)
 
     assert out["execution"]["outcome"] == "ESCALATED"
+
+
+# ---- approvals execute exactly what was approved --------------------------
+
+def test_the_queued_action_carries_the_full_intent():
+    platform = FakePlatform()          # T3
+    run(FakeLLM([gathered_everything()], decision()), platform)
+
+    action = platform.approvals[0]["action"]
+    assert action["recommendedQty"] == 800, "resume needs it to re-run the same checks"
+    assert action["decision"] == "MODIFY", "resume records the decision the agent made"
+
+
+def test_resume_hands_the_approval_id_to_the_write():
+    import execute
+    platform = FakePlatform()
+    action = {"sku": "SKU-MILK-1L", "nodeId": "NODE-BOG-01", "supplierId": "SUP-LACTEO",
+              "qty": 204, "unitPrice": 0.95, "expectedDelivery": "2026-03-15"}
+    out = execute.execute_and_verify(platform, FakeLLM([]), "r1", action, {}, 800,
+                                     approval_id="AP-1")
+
+    assert platform.created[0]["approvalId"] == "AP-1"
+    assert out["outcome"] == "VERIFIED"
+
+
+# ---- observability ---------------------------------------------------------
+
+def test_every_model_call_says_which_node_made_it():
+    llm = FakeLLM([gathered_everything()], decision())
+    run(llm, FakePlatform())
+    assert llm.labels == ["gather", "propose"]
+
+
+def test_run_stats_are_recorded_with_the_decision():
+    llm = FakeLLM([gathered_everything()], decision())
+    platform = FakePlatform()
+    run(llm, platform)
+
+    d = platform.decisions[0]
+    assert d["llmCalls"] == llm.calls == 2
+    assert "tokensIn" in d and "durationMs" in d
+
+
+def test_the_llm_reports_each_call_with_its_tokens(monkeypatch):
+    import llm as llm_mod
+
+    class NoLimit:
+        def acquire(self):
+            pass
+
+    class FakeChat:
+        def invoke(self, messages):
+            return AIMessage(content="ok", usage_metadata={
+                "input_tokens": 120, "output_tokens": 30, "total_tokens": 150})
+
+    monkeypatch.setattr(llm_mod.cfg, "gemini_key", "test-key")
+    seen = []
+    g = llm_mod.Gemini(limiter=NoLimit(), on_call=lambda **kw: seen.append(kw))
+    g._chat = FakeChat()
+
+    g.invoke(["hi"], label="propose")
+
+    assert seen[0]["label"] == "propose"
+    assert (seen[0]["tokens_in"], seen[0]["tokens_out"]) == (120, 30)
+    assert g.tokens_in == 120 and g.calls == 1
+
+
+def test_a_broken_tracer_does_not_break_the_call(monkeypatch):
+    import llm as llm_mod
+
+    class NoLimit:
+        def acquire(self):
+            pass
+
+    class FakeChat:
+        def invoke(self, messages):
+            return AIMessage(content="ok")
+
+    def boom(**kw):
+        raise RuntimeError("platform is down")
+
+    monkeypatch.setattr(llm_mod.cfg, "gemini_key", "test-key")
+    g = llm_mod.Gemini(limiter=NoLimit(), on_call=boom)
+    g._chat = FakeChat()
+
+    assert g.invoke(["hi"]).content == "ok"
+
+
+# ---- retrieval at decision time --------------------------------------------
+
+def test_retrieved_text_reaches_the_propose_prompt_whole():
+    long_policy = "x" * 1200 + " the 1.5x hard limit"
+    kb = FakeKB([{"ref": "POL-PERISH-02", "type": "policy", "similarity": 0.8,
+                  "text": f'<retrieved_doc ref="POL-PERISH-02">{long_policy}</retrieved_doc>'}])
+    llm = FakeLLM([gathered_everything()], decision())
+    run(llm, FakePlatform(), kb=kb)
+
+    propose_prompt = llm.prompts_seen[-1]
+    # facts get cut to 800 chars - retrieved text must not, or a policy loses its limit
+    assert "REFERENCE DOCUMENTS" in propose_prompt
+    assert "the 1.5x hard limit" in propose_prompt
+
+
+def test_two_searches_both_survive():
+    hits = iter([
+        [{"ref": "POL-PERISH-02", "type": "policy", "similarity": 0.8,
+          "text": '<retrieved_doc ref="POL-PERISH-02">perish</retrieved_doc>'}],
+        [{"ref": "SUP-LACTEO", "type": "supplier", "similarity": 0.7,
+          "text": '<retrieved_doc ref="SUP-LACTEO">lacteo</retrieved_doc>'}],
+    ])
+
+    def kb(query, **f):
+        # the third call is analyse's own policy lookup
+        return {"ok": True, "data": next(hits, [])}
+
+    llm = FakeLLM([AIMessage(content="", tool_calls=[
+        *gathered_everything().tool_calls[:-1],
+        {"name": "search_knowledge", "args": {"query": "perishable"}, "id": "s1"},
+        {"name": "search_knowledge", "args": {"query": "lacteo"}, "id": "s2"},
+    ])], decision())
+    out = run(llm, FakePlatform(), kb=kb)
+
+    # facts are keyed by tool name, so the second search used to overwrite the first
+    assert any("perish" in t for t in out["retrieved"])
+    assert any("lacteo" in t for t in out["retrieved"])
+
+
+def test_skipping_the_knowledge_search_gets_nudged():
+    reads_only = AIMessage(content="", tool_calls=gathered_everything().tool_calls[:-1])
+    llm = FakeLLM([reads_only], decision())
+    run(llm, FakePlatform())
+
+    nudge = [p for p in llm.prompts_seen if "not checked" in p]
+    assert nudge and "search-knowledge" in nudge[0]
+
+
+def test_citations_end_up_in_the_recorded_explanation():
+    cited = tool_call("record_decision", {
+        "decision": "MODIFY", "qty": 204, "confidence": 0.8,
+        "reasoning": "moq forces a small over-buy", "key_factors": [],
+        "citations": ["POL-PERISH-02", "SUP-LACTEO"]})
+    platform = FakePlatform()
+    kb = FakeKB([
+        {"ref": "POL-PERISH-02", "type": "policy", "similarity": 0.8,
+         "text": '<retrieved_doc ref="POL-PERISH-02">perish</retrieved_doc>'},
+        {"ref": "SUP-LACTEO", "type": "supplier", "similarity": 0.7,
+         "text": '<retrieved_doc ref="SUP-LACTEO">lacteo</retrieved_doc>'}])
+    out = run(FakeLLM([gathered_everything()], cited), platform, kb=kb)
+
+    assert out["proposal"]["citations"] == ["POL-PERISH-02", "SUP-LACTEO"]
+    assert platform.decisions[0]["explanation"].endswith("Sources: POL-PERISH-02, SUP-LACTEO")
+
+
+def test_every_knowledge_search_is_traced_with_what_came_back():
+    platform = FakePlatform()
+    out = run(FakeLLM([gathered_everything()], decision()), platform)
+
+    step = next(s for s in platform.steps if s["type"] == "RETRIEVAL")
+    assert step["payload"]["query"] == "perishable over-buy"
+    assert step["payload"]["hits"] == [{"ref": "POL-PERISH-02", "similarity": 0.81}]
+    assert out["searches"] == [{"query": "perishable over-buy"}]
+
+
+def test_a_reject_never_records_a_quantity():
+    # the live run said "REJECT 204" - nothing was ordered, but the record lied
+    out = run(FakeLLM([gathered_everything()], decision("REJECT", qty=204)), FakePlatform())
+    assert out["proposal"]["qty"] == 0
+
+
+# ---- the rules are looked up by code, not left to the model ---------------
+
+def test_policies_are_looked_up_even_if_the_model_never_searches():
+    kb = FakeKB()
+    reads_only = AIMessage(content="", tool_calls=gathered_everything().tool_calls[:-1])
+    llm = FakeLLM([reads_only, AIMessage(content="no thanks")], decision())
+    platform = FakePlatform()
+    run(llm, platform, kb=kb)
+
+    policy_lookups = [q for q, f in kb.queries if f.get("doc_type") == "policy"]
+    assert policy_lookups, "analyse must search the policies itself"
+    assert "minimum order quantity" in policy_lookups[0]   # built from the planner's steps
+    assert "POL-PERISH-02" in llm.prompts_seen[-1]
+    assert any(s["name"] == "policy_lookup" for s in platform.steps)
+
+
+# ---- doing nothing is not silent when the maths shows a need --------------
+
+def test_a_reject_with_a_real_need_goes_to_a_buyer():
+    platform = FakePlatform()          # plan: need 156, legal order 204
+    out = run(FakeLLM([gathered_everything()], decision("REJECT", qty=0)), platform)
+
+    assert out["execution"]["outcome"] == "NEEDS_APPROVAL"
+    assert out["execution"]["guard"] == "declined_despite_need"
+    assert platform.approvals[0]["action"]["qty"] == 204, "the buyer can approve the planner's order"
+    assert "need of 156" in platform.approvals[0]["reason"]
+    assert "/tools/create-po" not in platform.calls
+    assert platform.decisions[0]["decision"] == "REJECT", "the model's own call is still recorded"
+
+
+def test_a_reject_with_nothing_needed_stays_quiet():
+    platform = FakePlatform(plan=covered_plan())
+    out = run(FakeLLM([gathered_everything()], decision("REJECT", qty=0)), platform)
+    assert out["execution"]["outcome"] == "NO_ACTION"
+    assert not platform.approvals
+
+
+
+# ---- scenario 2: a short shipment, and the choice of where the rest comes from
+
+def short_shipment():
+    return {"run_id": "r2", "scenario": "S2_PARTIAL", "facts": {}, "errors": [],
+            "situation": {"sku": "SKU-COFFEE-500G", "node_id": "NODE-BOG-01",
+                          "supplier_id": "SUP-ANDINA", "recommended_qty": None,
+                          "po_id": "PO-0031"}}
+
+
+def s2_gather():
+    return AIMessage(content="", tool_calls=[
+        {"name": "get_purchase_order", "args": {"po_id": "PO-0031"}, "id": "a"},
+        {"name": "get_inventory_position", "args": {"sku": "SKU-COFFEE-500G", "node_id": "NODE-BOG-01"}, "id": "b"},
+        {"name": "get_demand_forecast", "args": {"sku": "SKU-COFFEE-500G", "node_id": "NODE-BOG-01"}, "id": "c"},
+        {"name": "get_suppliers", "args": {"sku": "SKU-COFFEE-500G"}, "id": "d"},
+        {"name": "search_knowledge", "args": {"query": "partial", "doc_type": "policy"}, "id": "e"},
+    ])
+
+
+def picks(supplier_id, qty=None):
+    args = {"decision": "MODIFY", "confidence": 0.8, "key_factors": [],
+            "reasoning": "top up the shortfall", "supplier_id": supplier_id}
+    if qty is not None:
+        args["qty"] = qty
+    return tool_call("record_decision", args)
+
+
+def test_s2_ranks_suppliers_and_shows_them_to_the_model():
+    llm = FakeLLM([s2_gather()], picks(None))
+    platform = FakePlatform(validation=auto_approve())
+    out = run(llm, platform, state=short_shipment())
+
+    assert "/tools/supplier-options" in platform.calls
+    assert "/tools/calculate-reorder" not in platform.calls
+    assert "SUPPLIER OPTIONS" in llm.prompts_seen[-1]
+    assert "SUP-GONE: not usable" in llm.prompts_seen[-1]
+    assert out["analysis"]["recommendedQty"] == 150         # best ranked by default
+
+
+def test_s2_choosing_another_supplier_switches_to_its_own_plan():
+    llm = FakeLLM([s2_gather()], picks("SUP-CAFEBR"))
+    platform = FakePlatform(validation=auto_approve())
+    out = run(llm, platform, state=short_shipment())
+
+    assert platform.validated["supplierId"] == "SUP-CAFEBR"
+    assert platform.validated["qty"] == 400                 # cafebr's plan, not andina's
+    assert platform.validated["unitPrice"] == 4.40
+    assert platform.created[0]["supplierId"] == "SUP-CAFEBR"
+
+
+def test_s2_a_supplier_that_was_not_offered_is_ignored():
+    llm = FakeLLM([s2_gather()], picks("SUP-MADE-UP"))
+    platform = FakePlatform(validation=auto_approve())
+    out = run(llm, platform, state=short_shipment())
+
+    assert platform.validated["supplierId"] == "SUP-ANDINA"
+    assert any("SUP-MADE-UP" in e for e in out["errors"])
+
+
+
+# ---- live run fixes: no order means no order, repairs are re-checked --------
+
+def test_modify_with_qty_zero_does_not_place_the_planners_order():
+    # live: "no additional order is required", decision MODIFY, qty left as 0 ->
+    # the planner's 170 got ordered. 0 must mean 0
+    platform = FakePlatform(validation=auto_approve())
+    out = run(FakeLLM([gathered_everything()], decision("MODIFY", qty=0)), platform)
+
+    assert "/tools/create-po" not in platform.calls
+    assert out["execution"]["guard"] == "declined_despite_need"
+
+
+def test_modify_without_a_qty_takes_the_planners_number():
+    no_qty = tool_call("record_decision", {"decision": "MODIFY", "confidence": 0.8,
+                                           "reasoning": "planner is right", "key_factors": []})
+    out = run(FakeLLM([gathered_everything()], no_qty), FakePlatform())
+    assert out["proposal"]["qty"] == 204
+
+
+def mismatch(level="L3", field="stockoutDays"):
+    return {"outcome": "MISMATCH", "notes": [],
+            "diffs": [{"level": level, "field": field, "intended": "0", "actual": "8", "ok": False}]}
+
+
+def test_a_repair_without_a_quantity_is_refused_not_amended_to_zero():
+    platform = FakePlatform(validation=auto_approve(), verification=mismatch())
+    llm = FakeLLM([gathered_everything()], decision(),
+                  repair=tool_call("choose_repair", {"repair": "amend", "reasoning": "fix it"}))
+    out = run(llm, platform)
+
+    assert not platform.amended, "nothing may be amended to 0"
+    assert out["execution"]["outcome"] == "ESCALATED"
+    assert "needs a quantity" in out["execution"]["repairs"][0]["overridden"]
+
+
+def test_a_repair_is_verified_again_before_it_counts():
+    platform = FakePlatform(validation=auto_approve(), verification=mismatch())
+    platform._reverify = mismatch()                  # the amend did not fix the shelf
+    llm = FakeLLM([gathered_everything()], decision(),
+                  repair=tool_call("choose_repair", {"repair": "amend", "qty": 240,
+                                                     "reasoning": "a bit more"}))
+    out = run(llm, platform)
+
+    assert "/tools/verify-po" in platform.calls
+    assert platform.reverified["qty"] == 240
+    assert out["execution"]["outcome"] == "ESCALATED", "an amend that did not fix it is not REPAIRED"
+
+
+def test_the_extraction_prompt_knows_today():
+    import inbox
+    from langchain_core.messages import AIMessage as AI
+
+    class Seen:
+        def invoke(self, messages, tools=None, label=None):
+            self.prompt = messages[0].content
+            return AI(content="")
+
+    llm = Seen()
+    inbox.extract(llm, "SUP-ANDINA", "", "arrives 14 March")
+    assert "Today is 2026-03-10" in llm.prompt
+
+
+# ---- citations are only ever what the agent was given ----------------------
+
+def test_a_policy_named_in_the_reasoning_becomes_a_citation():
+    # live: the model wrote "Per POL-PERISH-02 ..." but left citations empty
+    named = tool_call("record_decision", {
+        "decision": "MODIFY", "qty": 204, "confidence": 0.8, "key_factors": [],
+        "reasoning": "Per POL-PERISH-02 a small over-buy is acceptable with approval."})
+    out = run(FakeLLM([gathered_everything()], named), FakePlatform())
+    assert out["proposal"]["citations"] == ["POL-PERISH-02"]
+
+
+def test_a_citation_that_was_never_retrieved_is_dropped():
+    made_up = tool_call("record_decision", {
+        "decision": "MODIFY", "qty": 204, "confidence": 0.8, "key_factors": [],
+        "reasoning": "fine", "citations": ["POL-PERISH-02", "POL-DOES-NOT-EXIST"]})
+    out = run(FakeLLM([gathered_everything()], made_up), FakePlatform())
+
+    assert out["proposal"]["citations"] == ["POL-PERISH-02"]
+    assert any("POL-DOES-NOT-EXIST" in e for e in out["errors"])
+
+
+
+# ---- scenario 4: no legal purchase, so a transfer between stores -----------
+
+def no_legal_order():
+    """Rice: a real need, but budget and the supplier minimum make every purchase illegal."""
+    return {"recommendedQty": 0, "rawNeed": 713, "inventoryPosition": 80,
+            "leadTimeDays": 14, "unitPrice": 2.10,
+            "explanationSteps": ["No legal order: 140 is affordable but the minimum is 1000"],
+            "warnings": []}
+
+
+def transfers_it(from_node="NODE-BOG-02", qty=None):
+    args = {"decision": "ESCALATE", "confidence": 0.8, "key_factors": [],
+            "reasoning": "no legal purchase, POL-TRANSFER-01 allows a transfer",
+            "action_type": "transfer", "from_node": from_node}
+    if qty is not None:
+        args["qty"] = qty
+    return tool_call("record_decision", args)
+
+
+def test_transfer_options_are_put_in_front_of_the_model_when_nothing_is_legal():
+    llm = FakeLLM([gathered_everything()], transfers_it())
+    platform = FakePlatform(plan=no_legal_order())
+    run(llm, platform)
+
+    assert "/tools/transfer-options" in platform.calls
+    assert "TRANSFER OPTIONS" in llm.prompts_seen[-1]
+    assert "from NODE-BOG-02: send 188" in llm.prompts_seen[-1]
+
+
+def test_no_transfer_options_when_a_purchase_is_legal():
+    platform = FakePlatform()                         # milk: legal order of 204
+    run(FakeLLM([gathered_everything()], decision()), platform)
+    assert "/tools/transfer-options" not in platform.calls
+
+
+def test_a_transfer_always_goes_to_a_buyer_and_moves_nothing():
+    platform = FakePlatform(plan=no_legal_order())
+    out = run(FakeLLM([gathered_everything()], transfers_it()), platform)
+
+    action = platform.approvals[0]["action"]
+    assert action == {"type": "transfer", "sku": "SKU-MILK-1L", "fromNode": "NODE-BOG-02",
+                      "toNode": "NODE-BOG-01", "qty": 188, "decision": "ESCALATE",
+                      "reason": "no legal purchase, POL-TRANSFER-01 allows a transfer"}
+    assert "POL-TRANSFER-01" in platform.approvals[0]["reason"]
+    assert "/tools/create-transfer" not in platform.calls
+    assert "/tools/validate-purchase" not in platform.calls
+    assert out["execution"]["outcome"] == "NEEDS_APPROVAL"
+
+
+def test_the_model_can_send_less_but_never_more_than_the_planner():
+    platform = FakePlatform(plan=no_legal_order())
+    run(FakeLLM([gathered_everything()], transfers_it(qty=5000)), platform)
+    assert platform.approvals[0]["action"]["qty"] == 188
+
+
+def test_a_sender_that_was_not_offered_is_ignored():
+    platform = FakePlatform(plan=no_legal_order())
+    out = run(FakeLLM([gathered_everything()], transfers_it(from_node="NODE-MEX-01")), platform)
+    assert not any(a["action"].get("type") == "transfer" for a in platform.approvals)
+    assert any("NODE-MEX-01" in e for e in out["errors"])
+
+
+def test_an_approved_transfer_executes_once_and_is_verified():
+    import execute
+    platform = FakePlatform()
+    action = {"type": "transfer", "sku": "SKU-RICE-5KG", "fromNode": "NODE-BOG-02",
+              "toNode": "NODE-BOG-01", "qty": 188}
+    out = execute.execute_transfer(platform, "r4", action, "AP-9")
+
+    assert platform.transfers == [{"qty": 188, "approvalId": "AP-9"}]
+    assert out["outcome"] == "VERIFIED" and out["transferId"] == "TO-0001"
+
+
+def test_a_transfer_is_recorded_as_escalate_whatever_the_model_called_it():
+    platform = FakePlatform(plan=no_legal_order())
+    accept = tool_call("record_decision", {
+        "decision": "ACCEPT", "confidence": 0.8, "key_factors": [], "reasoning": "transfer it",
+        "action_type": "transfer", "from_node": "NODE-BOG-02"})
+    run(FakeLLM([gathered_everything()], accept), platform)
+    assert platform.decisions[0]["decision"] == "ESCALATE"
+    assert platform.approvals[0]["action"]["decision"] == "ESCALATE"

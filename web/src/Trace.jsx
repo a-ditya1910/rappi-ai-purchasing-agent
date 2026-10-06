@@ -64,13 +64,20 @@ export default function Trace({ runId, onPick }) {
                     <td className="muted">{s.seq}</td>
                     <td><span className="tag small">{s.type.toLowerCase()}</span></td>
                     <td className="mono">{s.name}</td>
-                    <td className="muted">{s.latencyMs != null ? s.latencyMs + 'ms' : ''}</td>
+                    <td className="muted">
+                      {s.latencyMs != null ? s.latencyMs + 'ms' : ''}
+                      {s.tokens != null && ` · ${s.tokens} tok`}
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
             <p className="muted small">
-              {run.steps?.length || 0} steps, all written by one Spring interceptor.
+              {run.steps?.length || 0} steps. Tool calls are written by the platform's
+              interceptor, model calls by the agent.
+              {run.llmCalls > 0 && <> {run.llmCalls} model calls
+                · {((run.tokensIn || 0) + (run.tokensOut || 0)).toLocaleString()} tokens
+                · {Math.round((run.durationMs || 0) / 100) / 10}s</>}
             </p>
           </>
         )}

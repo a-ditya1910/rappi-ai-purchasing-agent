@@ -17,6 +17,15 @@ class PlatformError(Exception):
     pass
 
 
+def start_run(scenario, base_url=None, **fields):
+    """Opens a run so everything after it has something to trace into. Used when
+    the agent starts work itself, like on an incoming supplier email."""
+    r = httpx.post(f"{(base_url or cfg.platform_url).rstrip('/')}/runs",
+                   json={"scenario": scenario, **fields}, timeout=30)
+    r.raise_for_status()
+    return r.json()["runId"]
+
+
 class Platform:
     def __init__(self, run_id, base_url=None, client=None):
         self.run_id = run_id
@@ -36,7 +45,9 @@ class Platform:
         return self._unwrap(path, r)
 
     def _unwrap(self, path, r):
-        self.calls.append(path)
+        # only tool calls count - the evals assert on these, and trace posts aren't tools
+        if path.startswith("/tools"):
+            self.calls.append(path)
         try:
             payload = r.json()
         except Exception:
@@ -95,18 +106,25 @@ class Platform:
     # ---- writes ----------------------------------------------------------
 
     def create_po(self, sku, nodeId, supplierId, qty, unitPrice, expectedDelivery,
-                  idempotencyKey, recommendedQty=None, reason=None):
+                  idempotencyKey, recommendedQty=None, reason=None, approvalId=None):
         return self.post("/tools/create-po", {
             "sku": sku, "nodeId": nodeId, "supplierId": supplierId, "qty": qty,
             "unitPrice": unitPrice, "expectedDelivery": expectedDelivery,
             "idempotencyKey": idempotencyKey, "recommendedQty": recommendedQty,
-            "reason": reason,
+            "reason": reason, "approvalId": approvalId,
         })
 
     def amend_po(self, poId, newQty, expectedVersion, reason):
         return self.post("/tools/amend-po", {
             "poId": poId, "newQty": newQty,
             "expectedVersion": expectedVersion, "reason": reason})
+
+    def verify_po(self, poId, action):
+        return self.post("/tools/verify-po", {
+            "poId": poId, "sku": action["sku"], "nodeId": action["nodeId"],
+            "supplierId": action["supplierId"], "qty": action["qty"],
+            "unitPrice": action.get("unitPrice"),
+            "expectedDelivery": action.get("expectedDelivery")})
 
     def cancel_po(self, poId, expectedVersion, reason):
         return self.post("/tools/cancel-po", {
@@ -116,21 +134,38 @@ class Platform:
         return self.post("/tools/request-approval", {
             "reason": reason, "riskTier": riskTier, "proposedAction": proposedAction})
 
-    def record_decision(self, decision, finalQty=None, explanation=None, validationReport=None):
-        return self.post("/tools/record-decision", {
-            "decision": decision, "finalQty": finalQty,
-            "explanation": explanation, "validationReport": validationReport})
+    def record_decision(self, decision, finalQty=None, explanation=None, validationReport=None,
+                        **stats):
+        body = {"decision": decision, "finalQty": finalQty,
+                "explanation": explanation, "validationReport": validationReport}
+        body.update(stats)     # llmCalls, tokensIn, tokensOut, durationMs
+        return self.post("/tools/record-decision", body)
+
+    def transfer_options(self, sku, nodeId):
+        return self.get("/tools/transfer-options", sku=sku, nodeId=nodeId)
+
+    def create_transfer(self, sku, fromNode, toNode, qty, idempotencyKey, approvalId=None):
+        return self.post("/tools/create-transfer", {
+            "sku": sku, "fromNode": fromNode, "toNode": toNode, "qty": qty,
+            "idempotencyKey": idempotencyKey, "approvalId": approvalId})
+
+    def supplier_options(self, sku, nodeId):
+        return self.get("/tools/supplier-options", sku=sku, nodeId=nodeId)
+
+    def supplier_event(self, poId, sender, kind, confirmedQty=None, confirmedDelivery=None,
+                       unitPrice=None, rawText=None):
+        return self.post("/tools/supplier-event", {
+            "poId": poId, "sender": sender, "kind": kind, "confirmedQty": confirmedQty,
+            "confirmedDelivery": confirmedDelivery, "unitPrice": unitPrice, "rawText": rawText})
 
     def demand_anomaly(self, sku, nodeId, lookbackDays=60):
         return self.get("/tools/demand-anomaly", sku=sku, nodeId=nodeId, lookbackDays=lookbackDays)
 
-    def policy_search(self, query, k=3):
-        return self.get("/tools/policy-search", query=query, k=k)
-
     # ---- run bookkeeping -------------------------------------------------
 
-    def log_step(self, type_, name, payload=None):
+    def log_step(self, type_, name, payload=None, latencyMs=None, tokens=None):
         """Agent side events - the model's own reasoning. Tool calls trace
         themselves through the interceptor."""
         return self.post(f"/runs/{self.run_id}/steps",
-                         {"type": type_, "name": name, "payload": payload or {}})
+                         {"type": type_, "name": name, "payload": payload or {},
+                          "latencyMs": latencyMs, "tokens": tokens})

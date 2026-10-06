@@ -54,10 +54,11 @@ class RateLimiter:
 
 
 class Gemini:
-    def __init__(self, model=None, limiter=None):
+    def __init__(self, model=None, limiter=None, on_call=None):
         cfg.require_key()
         self.model_name = model or cfg.model
         self.limiter = limiter or RateLimiter()
+        self.on_call = on_call
         self.calls = 0
         self.tokens_in = 0
         self.tokens_out = 0
@@ -73,17 +74,26 @@ class Gemini:
     def bind(self, tools):
         return self._chat.bind_tools(tools)
 
-    def invoke(self, messages, tools=None):
-        """One model call. Retries on transient failures, counts what it spent."""
+    def invoke(self, messages, tools=None, label="llm"):
+        """One model call. Retries on transient failures, counts what it spent.
+        label says which graph node made the call, for the trace."""
         chat = self.bind(tools) if tools else self._chat
 
         last = None
         for attempt in range(3):
             self.limiter.acquire()
             try:
+                t0 = time.time()     # after the limiter, so waiting doesn't count as latency
                 res = chat.invoke(messages)
                 self.calls += 1
-                self._count(res)
+                tin, tout = self._count(res)
+                if self.on_call:
+                    # tracing must never be the reason a decision fails
+                    try:
+                        self.on_call(label=label, model=self.model_name, tokens_in=tin,
+                                     tokens_out=tout, ms=int((time.time() - t0) * 1000))
+                    except Exception as e:
+                        log.warning("could not trace llm call: %s", e)
                 return res
             except Exception as e:
                 last = e
@@ -102,8 +112,11 @@ class Gemini:
 
     def _count(self, res):
         meta = getattr(res, "usage_metadata", None) or {}
-        self.tokens_in += meta.get("input_tokens", 0) or 0
-        self.tokens_out += meta.get("output_tokens", 0) or 0
+        tin = meta.get("input_tokens", 0) or 0
+        tout = meta.get("output_tokens", 0) or 0
+        self.tokens_in += tin
+        self.tokens_out += tout
+        return tin, tout
 
 
 class DailyQuotaExhausted(RuntimeError):

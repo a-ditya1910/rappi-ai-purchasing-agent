@@ -56,7 +56,9 @@ def check(case, run):
         out.append(("quantity band", lo <= qty <= hi, "%s in [%s, %s]" % (qty, lo, hi)))
 
     if "required_tools" in e:
-        missing = [t for t in e["required_tools"] if t not in tools]
+        # /tools/po counts /tools/po/PO-0031 - the id is part of the path
+        missing = [t for t in e["required_tools"]
+                   if not any(x == t or x.startswith(t + "/") for x in tools)]
         out.append(("tool coverage", not missing,
                     "all present" if not missing else "never called: " + ", ".join(missing)))
 
@@ -96,6 +98,31 @@ def check(case, run):
                         % (pos, it, pos, it)))
 
 
+    if "reading" in e:
+        # what the model pulled out of the email, before the platform checked it
+        got = run.get("reading") or {}
+        wrong = {k: got.get(k) for k, v in e["reading"].items() if got.get(k) != v}
+        out.append(("read the email right", not wrong,
+                    "as expected" if not wrong else "got %s" % wrong))
+
+    if "action_type" in e:
+        act = (run.get("execution") or {}).get("action") or {}
+        got = act.get("type") or "purchase"
+        out.append(("chose the right kind of action", got == e["action_type"],
+                    "%s (expected %s)" % (got, e["action_type"])))
+
+    if "must_cite" in e:
+        if "citations" not in run:
+            # recorded before the agent had a knowledge base. say so rather than
+            # passing it, or failing a run that never had the chance
+            out.append(("cites its sources", None, "recorded before RAG - re-record with --live"))
+        else:
+            cited = run.get("citations") or []
+            missing = [c for c in e["must_cite"] if c not in cited]
+            out.append(("cites its sources", not missing,
+                        "cited " + (", ".join(cited) or "nothing")
+                        + ("" if not missing else "; missing " + ", ".join(missing))))
+
     if "max_gather_turns" in e:
         turns = run.get("gatherTurns") or 0
         out.append(("batched its reads", turns <= e["max_gather_turns"],
@@ -123,6 +150,15 @@ def check(case, run):
 def run_live(case):
     http = httpx.Client(timeout=180)
     body = dict(case["input"])
+
+    if "email" in body:
+        # the agent opens its own run for an incoming email
+        res = http.post(AGENT + "/supplier-messages", json=body["email"])
+        res.raise_for_status()
+        out = res.json()
+        out["_recordedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        out["_model"] = os.getenv("GEMINI_MODEL", "unknown")
+        return out
 
     r = http.post(PLATFORM + "/runs", json={
         "scenario": body["scenario"], "sku": body.get("sku"),
@@ -188,6 +224,7 @@ def main():
     totals = {}
     failures = []
     skipped = []
+    not_yet = []
 
     for case in cases:
         if args.live:
@@ -204,6 +241,9 @@ def main():
                 continue
 
         results = check(case, run)
+        # ok=None means the recording predates the check - shown, not scored
+        pending = [r for r in results if r[1] is None]
+        results = [r for r in results if r[1] is not None]
         passed = sum(1 for _, ok, _ in results if ok)
         mark = "PASS" if passed == len(results) else "FAIL"
 
@@ -222,6 +262,9 @@ def main():
                 totals[dim][0] += 1
             else:
                 failures.append((case["id"], dim, detail))
+        for dim, _, detail in pending:
+            print("     %-22s %-4s %s" % (dim, "--", detail))
+            not_yet.append((case["id"], dim))
 
     print()
     print("=" * 74)
@@ -234,6 +277,12 @@ def main():
         print("FAILURES")
         for cid, dim, detail in failures:
             print("  %-40s %-22s %s" % (cid, dim, detail))
+
+    if not_yet:
+        print()
+        print("NOT SCORED (recorded before the check existed)")
+        for cid, dim in not_yet:
+            print("  %-40s %s" % (cid, dim))
 
     if skipped:
         print()

@@ -1,0 +1,10 @@
+[
+  {"query": "the supplier only shipped half of what we ordered", "doc_type": "policy", "expect": "POL-PARTIAL-01"},
+  {"query": "the minimum order is more than we need for something that goes off quickly", "doc_type": "policy", "expect": "POL-PERISH-02"},
+  {"query": "the unit price is 15% higher than what we paid last time", "doc_type": "policy", "expect": "POL-PRICE-01"},
+  {"query": "we can't afford this order with what is left this month", "doc_type": "policy", "expect": "POL-BUDGET-EXC-01"},
+  {"query": "can another dark store send us some of its stock", "doc_type": "policy", "expect": "POL-TRANSFER-01"},
+  {"query": "sales jumped for a week, should we change the plan", "doc_type": "policy", "expect": "POL-FORECAST-01"},
+  {"query": "which coffee supplier can ship large quantities in a day", "doc_type": "supplier", "expect": "SUP-CAFEBR"},
+  {"query": "how should milk be stored and how long does it keep", "doc_type": "product", "expect": "SKU-MILK-1L"}
+]

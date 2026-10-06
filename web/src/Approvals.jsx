@@ -51,8 +51,10 @@ export default function Approvals({ onOpen }) {
         return (
           <div className="card" key={a.id}>
             <div className="verdict">
-              <b>{act.qty}</b> units of {act.sku}
-              {act.unitPrice && <span className="muted"> at ${act.unitPrice}</span>}
+              {act.type === 'transfer'
+                ? <>Transfer <b>{act.qty}</b> of {act.sku} · {act.fromNode} → {act.toNode}</>
+                : <><b>{act.qty}</b> units of {act.sku}
+                    {act.unitPrice && <span className="muted"> at ${act.unitPrice}</span>}</>}
               <span className="tag warn">{a.riskTier}</span>
             </div>
 
@@ -98,7 +100,8 @@ function Outcome({ o }) {
       <div>
         <b>{o.res.status}</b>
         {o.res.resumed && <> · agent resumed · <b>{res.outcome}</b>
-          {res.poId && <> · {res.poId}</>}</>}
+          {res.poId && <> · {res.poId}</>}
+          {res.transferId && <> · {res.transferId}</>}</>}
       </div>
       {v.diffs && (
         <table className="diff">

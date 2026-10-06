@@ -16,6 +16,7 @@ import com.rappi.buyer.repo.ProductRepo;
 import com.rappi.buyer.repo.PurchaseOrderRepo;
 import com.rappi.buyer.repo.SupplierProductRepo;
 import com.rappi.buyer.repo.SupplierRepo;
+import com.rappi.buyer.repo.TransferOrderRepo;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -67,6 +68,7 @@ class ReorderPlannerTest {
     @Mock ForecastRepo forecasts;
     @Mock PurchaseOrderRepo purchaseOrders;
     @Mock BudgetRepo budgets;
+    @Mock TransferOrderRepo transfers;
 
     ReorderPlanner planner;
 
@@ -74,7 +76,7 @@ class ReorderPlannerTest {
     void setUp() {
         Clock clock = Clock.fixed(TODAY.atStartOfDay(ZoneOffset.UTC).toInstant(), ZoneOffset.UTC);
         planner = new ReorderPlanner(products, nodes, suppliers, supplierProducts, inventory,
-                forecasts, purchaseOrders, budgets, planningProps(), clock);
+                forecasts, purchaseOrders, budgets, transfers, planningProps(), clock);
 
         product(12, 1100, 12, true, "A");
         node(7, 40_000_000L, 34_000_000L);
@@ -83,6 +85,7 @@ class ReorderPlannerTest {
         inventory(320, 40, 400);
         forecast(55, 12);
         when(purchaseOrders.sumIncomingBy(anyString(), anyString(), any())).thenReturn(400);
+        when(purchaseOrders.sumOpenIncoming(anyString(), anyString())).thenReturn(400);
         budget("2500", "1620", "400");   // 480 available
     }
 
@@ -128,11 +131,26 @@ class ReorderPlannerTest {
     void inTransitConflictIsFlagged() {
         inventory(320, 40, 400);
         when(purchaseOrders.sumIncomingBy(anyString(), anyString(), any())).thenReturn(700);
+        when(purchaseOrders.sumOpenIncoming(anyString(), anyString())).thenReturn(700);
 
         ReorderPlan p = planner.plan(SKU, NODE, SUP);
 
         assertThat(p.inTransit()).isEqualTo(700);
         assertThat(p.warnings()).anyMatch(w -> w.startsWith("DATA_CONFLICT"));
+    }
+
+    @Test
+    @DisplayName("a PO landing after the window is not a conflict, it just does not count yet")
+    void poBeyondTheWindowIsNotAConflict() {
+        // 400 inside the 12 day window, another 240 lands later. the column holds all 640
+        inventory(320, 40, 640);
+        when(purchaseOrders.sumIncomingBy(anyString(), anyString(), any())).thenReturn(400);
+        when(purchaseOrders.sumOpenIncoming(anyString(), anyString())).thenReturn(640);
+
+        ReorderPlan p = planner.plan(SKU, NODE, SUP);
+
+        assertThat(p.warnings()).noneMatch(w -> w.startsWith("DATA_CONFLICT"));
+        assertThat(p.inventoryPosition()).isEqualTo(680);     // only the in-window 400 counts
     }
 
     @Test

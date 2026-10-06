@@ -159,6 +159,12 @@ function Result({ r, onOpen }) {
           <ul>{r.keyFactors.map((f, i) => <li key={i}>{f}</li>)}</ul></>
       )}
 
+      {r.citations?.length > 0 && (
+        <><h3>Sources</h3>
+          <p>{r.citations.map(c => <span key={c} className="tag">{c}</span>)}</p>
+          <p className="muted small">Retrieved from the knowledge base at decision time.</p></>
+      )}
+
       {r.assumptions?.length > 0 && (
         <><h3>Taken on faith</h3>
           <ul className="muted">{r.assumptions.map((a, i) => <li key={i}>{a}</li>)}</ul></>

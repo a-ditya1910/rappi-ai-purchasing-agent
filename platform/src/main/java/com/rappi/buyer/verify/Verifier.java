@@ -5,10 +5,13 @@ import com.rappi.buyer.constraints.Proposal;
 import com.rappi.buyer.constraints.ValidationReport;
 import com.rappi.buyer.domain.PoLine;
 import com.rappi.buyer.domain.PurchaseOrder;
+import com.rappi.buyer.domain.TransferOrder;
 import com.rappi.buyer.planner.CoverageSimulator;
 import com.rappi.buyer.planner.ReorderPlan;
 import com.rappi.buyer.planner.ReorderPlanner;
+import com.rappi.buyer.planner.TransferPlanner;
 import com.rappi.buyer.tools.PurchaseOrderService;
+import com.rappi.buyer.tools.TransferService;
 import com.rappi.buyer.verify.VerificationReport.Diff;
 import com.rappi.buyer.verify.VerificationReport.Outcome;
 
@@ -43,13 +46,58 @@ public class Verifier {
     private final ConstraintEngine constraints;
     private final ReorderPlanner planner;
     private final CoverageSimulator coverage;
+    private final TransferService transfers;
+    private final TransferPlanner transferPlanner;
 
     public Verifier(PurchaseOrderService orders, ConstraintEngine constraints,
-                    ReorderPlanner planner, CoverageSimulator coverage) {
+                    ReorderPlanner planner, CoverageSimulator coverage,
+                    TransferService transfers, TransferPlanner transferPlanner) {
         this.orders = orders;
         this.constraints = constraints;
         this.planner = planner;
         this.coverage = coverage;
+        this.transfers = transfers;
+        this.transferPlanner = transferPlanner;
+    }
+
+    /**
+     * The same three questions for a transfer between stores.
+     *
+     *   L1  is the transfer row what was approved
+     *   L2  does the sending store still hold its own safety stock - the rule a
+     *       transfer exists under, POL-TRANSFER-01
+     *   L3  will the receiving store's shelf actually stay above zero
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW, readOnly = true)
+    public VerificationReport verifyTransfer(String transferId, String sku, String fromNode,
+                                             String toNode, int qty) {
+        List<Diff> diffs = new ArrayList<>();
+        List<String> notes = new ArrayList<>();
+
+        TransferOrder t = transfers.reread(transferId);
+        diffs.add(new Diff("L1", "qty", str(qty), str(t.getQty()), t.getQty() == qty));
+        diffs.add(new Diff("L1", "route", fromNode + " -> " + toNode,
+                t.getFromNode() + " -> " + t.getToNode(),
+                t.getFromNode().equals(fromNode) && t.getToNode().equals(toNode)));
+        diffs.add(new Diff("L1", "status", "IN_TRANSIT", str(t.getStatus()),
+                t.getStatus() == TransferOrder.Status.IN_TRANSIT));
+
+        TransferPlanner.TransferPlan after = transferPlanner.plan(sku, toNode);
+        after.options().stream().filter(o -> o.fromNode().equals(fromNode)).findFirst()
+                .ifPresentOrElse(o -> diffs.add(new Diff("L2", "senderKeepsSafetyStock",
+                                ">= " + o.keep(), str(o.available()), o.available() >= o.keep())),
+                        () -> diffs.add(new Diff("L2", "senderKeepsSafetyStock", "sender found",
+                                "missing", false)));
+
+        CoverageSimulator.Coverage cov = coverage.simulate(sku, toNode, after.horizonDays());
+        diffs.add(new Diff("L3", "stockoutDays", "0", str(cov.stockoutDays()), cov.stockoutDays() == 0));
+        if (cov.stockoutDays() > 0) {
+            notes.add("still short: %d days below zero from %s".formatted(cov.stockoutDays(), cov.firstStockout()));
+            notes.addAll(cov.timeline());
+        }
+
+        boolean clean = diffs.stream().allMatch(Diff::ok);
+        return new VerificationReport(transferId, clean ? Outcome.VERIFIED : Outcome.MISMATCH, diffs, notes);
     }
 
     /**
@@ -123,7 +171,7 @@ public class Verifier {
                 Math.max(confirmed, 1), line.getUnitPrice(), po.getExpectedDelivery(),
                 intended.recommendedQty());
 
-        ValidationReport post = constraints.validate(asBuilt, after);
+        ValidationReport post = constraints.validate(asBuilt, after, true);
         boolean legal = !post.blocking().stream()
                 // the order we just placed is obviously in the window now, that is
                 // not a violation we created

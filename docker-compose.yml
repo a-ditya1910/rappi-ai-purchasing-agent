@@ -29,6 +29,25 @@ services:
       timeout: 3s
       retries: 10
 
+  # the agent's knowledge index. separate from mysql on purpose - mysql is the
+  # system of record and the agent still has no credentials for it
+  vectordb:
+    image: pgvector/pgvector:pg16
+    container_name: buyer-vectordb
+    environment:
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: rag
+      POSTGRES_DB: rag
+    ports:
+      - "${VECTOR_DB_PORT:-5433}:5432"
+    volumes:
+      - vector-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag -d rag"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   platform:
     build: ./platform
     container_name: buyer-platform
@@ -51,13 +70,17 @@ services:
     build: ./agent
     container_name: buyer-agent
     depends_on:
-      - platform
+      platform: { condition: service_started }
+      vectordb: { condition: service_healthy }
     environment:
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.1-flash-lite}
+      GEMINI_EMBED_MODEL: ${GEMINI_EMBED_MODEL:-gemini-embedding-001}
       GEMINI_RPM_LIMIT: ${GEMINI_RPM_LIMIT:-14}
       PLATFORM_BASE_URL: http://platform:8080
       REDIS_HOST: redis
+      VECTOR_DB_URL: postgresql+psycopg://rag:rag@vectordb:5432/rag
+      SIM_DATE: ${SIM_DATE:-2026-03-10}
     ports:
       - "8100:8100"
 
@@ -72,3 +95,4 @@ services:
 
 volumes:
   mysql-data:
+  vector-data:

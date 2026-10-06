@@ -16,6 +16,7 @@ import com.rappi.buyer.repo.ProductRepo;
 import com.rappi.buyer.repo.PurchaseOrderRepo;
 import com.rappi.buyer.repo.SupplierProductRepo;
 import com.rappi.buyer.repo.SupplierRepo;
+import com.rappi.buyer.repo.TransferOrderRepo;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -51,13 +52,15 @@ public class ReorderPlanner {
     private final ForecastRepo forecasts;
     private final PurchaseOrderRepo purchaseOrders;
     private final BudgetRepo budgets;
+    private final TransferOrderRepo transfers;
     private final PlanningProperties props;
     private final Clock clock;
 
     public ReorderPlanner(ProductRepo products, NodeRepo nodes, SupplierRepo suppliers,
                           SupplierProductRepo supplierProducts, InventoryRepo inventory,
                           ForecastRepo forecasts, PurchaseOrderRepo purchaseOrders,
-                          BudgetRepo budgets, PlanningProperties props, Clock clock) {
+                          BudgetRepo budgets, TransferOrderRepo transfers,
+                          PlanningProperties props, Clock clock) {
         this.products = products;
         this.nodes = nodes;
         this.suppliers = suppliers;
@@ -66,6 +69,7 @@ public class ReorderPlanner {
         this.forecasts = forecasts;
         this.purchaseOrders = purchaseOrders;
         this.budgets = budgets;
+        this.transfers = transfers;
         this.props = props;
         this.clock = clock;
     }
@@ -97,11 +101,19 @@ public class ReorderPlanner {
 
         // Only POs landing inside the protection period cover demand inside it.
         // Anything arriving later is not help we can count on.
-        int derivedInTransit = purchaseOrders.sumIncomingBy(nodeId, sku, today.plusDays(protection));
-        if (derivedInTransit != inv.getInTransit()) {
-            warns.add(("DATA_CONFLICT: inventory.in_transit is %d but open purchase orders arriving "
-                    + "within %d days sum to %d. Not ordering against a position we cannot trust.")
-                    .formatted(inv.getInTransit(), protection, derivedInTransit));
+        // transfers from other stores are incoming stock just like a PO
+        int derivedInTransit = purchaseOrders.sumIncomingBy(nodeId, sku, today.plusDays(protection))
+                + transfers.sumIncomingBy(nodeId, sku, today.plusDays(protection));
+
+        // the stored column is every open unit on its way, so compare it with every
+        // open PO. comparing it with the in-window sum flagged any PO landing later
+        // as a conflict.
+        int allIncoming = purchaseOrders.sumOpenIncoming(nodeId, sku)
+                + transfers.sumOpenIncoming(nodeId, sku);
+        if (allIncoming != inv.getInTransit()) {
+            warns.add(("DATA_CONFLICT: inventory.in_transit is %d but open purchase orders "
+                    + "sum to %d. Not ordering against a position we cannot trust.")
+                    .formatted(inv.getInTransit(), allIncoming));
         }
 
         int onHand = Math.max(0, inv.getOnHand());
@@ -158,10 +170,8 @@ public class ReorderPlanner {
         // Two independent sources of variance: demand wobbles day to day, and the
         // supplier's lead time wobbles too. Dropping the second term is the usual
         // textbook shortcut and it under-buffers unreliable suppliers.
-        double demandVar = protection * Math.pow(fcStd.doubleValue(), 2);
-        double leadVar = Math.pow(meanDaily.doubleValue() * supplier.getLeadTimeStd().doubleValue(), 2);
-        double sigma = Math.sqrt(demandVar + leadVar);
-        int safetyStock = (int) Math.ceil(z * sigma);
+        int safetyStock = safetyStock(z, protection, fcStd.doubleValue(), meanDaily.doubleValue(),
+                supplier.getLeadTimeStd().doubleValue());
         steps.add("Safety stock = %.2f z x sqrt(%d x %.1f^2 + (%.1f x %.1f)^2) = %d units"
                 .formatted(z, protection, fcStd.doubleValue(), meanDaily.doubleValue(),
                         supplier.getLeadTimeStd().doubleValue(), safetyStock));
@@ -243,6 +253,17 @@ public class ReorderPlanner {
                 target, rawNeed, afterMoq, afterCasePack, maxAffordable, maxStorable, qty,
                 coverNow, coverAfter, price, cost,
                 List.copyOf(steps), List.copyOf(warns));
+    }
+
+    /**
+     * z x sqrt(days x demand std^2 + (mean daily x lead time std)^2). Shared with the
+     * transfer planner, so a store's safety stock means the same thing whether it
+     * is buying or giving stock away.
+     */
+    static int safetyStock(double z, int days, double demandStd, double meanDaily, double leadTimeStd) {
+        double demandVar = days * Math.pow(demandStd, 2);
+        double leadVar = Math.pow(meanDaily * leadTimeStd, 2);
+        return (int) Math.ceil(z * Math.sqrt(demandVar + leadVar));
     }
 
     private Duration staleBy(Instant when) {

@@ -1,8 +1,14 @@
 package com.rappi.buyer.verify;
 
 import com.rappi.buyer.constraints.Proposal;
+import com.rappi.buyer.domain.AgentRun;
+import com.rappi.buyer.domain.Approval;
 import com.rappi.buyer.domain.PoStatus;
 import com.rappi.buyer.domain.PurchaseOrder;
+import com.rappi.buyer.planner.ReorderPlanner;
+import com.rappi.buyer.repo.AgentRunRepo;
+import com.rappi.buyer.repo.ApprovalRepo;
+import com.rappi.buyer.repo.InventoryRepo;
 import com.rappi.buyer.repo.PurchaseOrderRepo;
 import com.rappi.buyer.tools.PurchaseOrderService;
 import com.rappi.buyer.tools.PurchaseOrderService.WriteResult;
@@ -13,6 +19,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.util.UUID;
 
@@ -31,11 +38,126 @@ class WriteAndVerifyIT {
     @Autowired PurchaseOrderService orders;
     @Autowired Verifier verifier;
     @Autowired PurchaseOrderRepo purchaseOrders;
+    @Autowired AgentRunRepo runs;
+    @Autowired ApprovalRepo approvals;
+    @Autowired InventoryRepo inventory;
+    @Autowired ReorderPlanner planner;
 
     static final String NODE = "NODE-BOG-01";
+    static final LocalDate MILK_DELIVERY = LocalDate.of(2026, 3, 15);
 
     private String key() {
         return "test-" + UUID.randomUUID();
+    }
+
+    private String newRun() {
+        AgentRun r = new AgentRun();
+        r.setId(UUID.randomUUID().toString());
+        r.setScenario("TEST");
+        r.setInput("{}");
+        r.setStatus(AgentRun.Status.RUNNING);
+        r.setCreatedAt(Instant.now());
+        runs.save(r);
+        return r.getId();
+    }
+
+    private String approve(String runId, String sku, String supplier, int qty, String price) {
+        Approval a = new Approval();
+        a.setId(UUID.randomUUID().toString());
+        a.setRunId(runId);
+        a.setReason("test");
+        a.setRiskTier("T3");
+        a.setProposedAction("{\"sku\":\"%s\",\"nodeId\":\"%s\",\"supplierId\":\"%s\",\"qty\":%d,\"unitPrice\":%s}"
+                .formatted(sku, NODE, supplier, qty, price));
+        a.setStatus(Approval.Status.APPROVED);
+        a.setCreatedAt(Instant.now());
+        approvals.save(a);
+        return a.getId();
+    }
+
+    private void cleanup(WriteResult res) {
+        if (res.executed()) {
+            orders.cancel(res.poId(), orders.reread(res.poId()).getVersion(), "cleanup");
+        }
+    }
+
+    // ---- approvals -------------------------------------------------------
+
+    @Test
+    @DisplayName("a buyer approved T3 order actually executes")
+    void approvedT3OrderExecutes() {
+        String run = newRun();
+        String ap = approve(run, "SKU-MILK-1L", "SUP-LACTEO", 204, "0.95");
+
+        WriteResult res = orders.create("SKU-MILK-1L", NODE, "SUP-LACTEO", 204,
+                new BigDecimal("0.95"), MILK_DELIVERY, key(), 800, run, "agent", ap);
+
+        assertThat(res.executed()).as(res.message()).isTrue();
+        assertThat(res.validation().riskTier()).isEqualTo("T3");   // still T3, the buyer owned it
+        cleanup(res);
+    }
+
+    @Test
+    @DisplayName("approving 204 does not let the agent order 216")
+    void approvalCannotChangeTheOrder() {
+        String run = newRun();
+        String ap = approve(run, "SKU-MILK-1L", "SUP-LACTEO", 204, "0.95");
+
+        WriteResult res = orders.create("SKU-MILK-1L", NODE, "SUP-LACTEO", 216,
+                new BigDecimal("0.95"), MILK_DELIVERY, key(), 800, run, "agent", ap);
+
+        assertThat(res.executed()).isFalse();
+        assertThat(res.message()).contains("different order");
+        cleanup(res);
+    }
+
+    @Test
+    @DisplayName("an approval never overrides a block")
+    void approvalNeverOverridesABlock() {
+        // 600 milk is $570 against $480 of dairy budget
+        String run = newRun();
+        String ap = approve(run, "SKU-MILK-1L", "SUP-LACTEO", 600, "0.95");
+
+        WriteResult res = orders.create("SKU-MILK-1L", NODE, "SUP-LACTEO", 600,
+                new BigDecimal("0.95"), MILK_DELIVERY, key(), 800, run, "agent", ap);
+
+        assertThat(res.executed()).isFalse();
+        assertThat(res.message()).startsWith("blocked").contains("BUDGET");
+        cleanup(res);
+    }
+
+    // ---- in transit and ids ----------------------------------------------
+
+    @Test
+    @DisplayName("in_transit moves with the order, so the next plan has no data conflict")
+    void inTransitFollowsTheOrder() {
+        int before = inventory.findByNodeIdAndSku(NODE, "SKU-CHIPS-150G").orElseThrow().getInTransit();
+
+        WriteResult res = orders.create("SKU-CHIPS-150G", NODE, "SUP-SNACKCO", 240,
+                new BigDecimal("0.62"), LocalDate.of(2026, 3, 24), key(), 240, null, "test");
+        assertThat(res.executed()).as(res.message()).isTrue();
+
+        assertThat(inventory.findByNodeIdAndSku(NODE, "SKU-CHIPS-150G").orElseThrow().getInTransit())
+                .isEqualTo(before + 240);
+        assertThat(planner.plan("SKU-CHIPS-150G", NODE, "SUP-SNACKCO").warnings())
+                .noneMatch(w -> w.startsWith("DATA_CONFLICT"));
+
+        cleanup(res);
+        assertThat(inventory.findByNodeIdAndSku(NODE, "SKU-CHIPS-150G").orElseThrow().getInTransit())
+                .isEqualTo(before);
+    }
+
+    @Test
+    @DisplayName("two orders get two different ids")
+    void idsAreUnique() {
+        WriteResult a = orders.create("SKU-CHIPS-150G", NODE, "SUP-SNACKCO", 240,
+                new BigDecimal("0.62"), LocalDate.of(2026, 3, 24), key(), 240, null, "test");
+        WriteResult b = orders.create("SKU-CHIPS-150G", NODE, "SUP-SNACKCO", 240,
+                new BigDecimal("0.62"), LocalDate.of(2026, 3, 24), key(), 240, null, "test");
+
+        assertThat(a.poId()).startsWith("PO-").isNotEqualTo(b.poId());
+        cleanup(a);
+        cleanup(b);
     }
 
     @Test
@@ -102,14 +224,36 @@ class WriteAndVerifyIT {
         PurchaseOrder po = orders.reread(res.poId());
         int current = po.getVersion();
 
-        WriteResult stale = orders.amend(res.poId(), 120, current - 1, "should not apply");
+        // 264 = 11 cases of 24, above the 240 minimum. the old test amended to 120,
+        // below the minimum, which only passed because amend skipped the rules
+        WriteResult stale = orders.amend(res.poId(), 264, current - 1, "should not apply");
         assertThat(stale.executed()).isFalse();
         assertThat(stale.message()).contains("STALE_VERSION");
 
-        WriteResult fresh = orders.amend(res.poId(), 120, current, "correct version");
+        WriteResult fresh = orders.amend(res.poId(), 264, current, "correct version");
         assertThat(fresh.executed()).isTrue();
 
         orders.cancel(res.poId(), orders.reread(res.poId()).getVersion(), "cleanup");
+    }
+
+    @Test
+    @DisplayName("an amend goes through the rules: below the minimum or to zero is refused")
+    void amendIsValidated() {
+        WriteResult res = orders.create("SKU-CHIPS-150G", NODE, "SUP-SNACKCO", 240,
+                new BigDecimal("0.62"), LocalDate.of(2026, 3, 24), key(), 240, null, "test");
+        assertThat(res.executed()).as(res.message()).isTrue();
+        int v = orders.reread(res.poId()).getVersion();
+
+        WriteResult belowMoq = orders.amend(res.poId(), 120, v, "half");
+        assertThat(belowMoq.executed()).isFalse();
+        assertThat(belowMoq.message()).contains("MOQ");
+
+        WriteResult zero = orders.amend(res.poId(), 0, v, "nothing");
+        assertThat(zero.executed()).isFalse();
+        assertThat(zero.message()).contains("cancel-po");
+
+        assertThat(orders.reread(res.poId()).getLines().get(0).getQtyOrdered()).isEqualTo(240);
+        cleanup(res);
     }
 
     @Test

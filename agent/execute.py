@@ -28,8 +28,12 @@ def idempotency_key(run_id, action_type, sku, qty):
     return hashlib.sha1(raw.encode()).hexdigest()[:32]
 
 
-def execute_and_verify(platform, llm, run_id, action, plan, recommended_qty=None):
+def execute_and_verify(platform, llm, run_id, action, plan, recommended_qty=None,
+                       approval_id=None):
     """Place the order, then work out whether what happened matches the intent.
+
+    approval_id is set when a buyer approved this exact action. The platform
+    checks it matches before letting a T3 order through.
 
     Returns a dict the caller records: what was done, what was found, what was
     done about it.
@@ -43,7 +47,7 @@ def execute_and_verify(platform, llm, run_id, action, plan, recommended_qty=None
         sku=sku, nodeId=action["nodeId"], supplierId=action["supplierId"],
         qty=qty, unitPrice=action.get("unitPrice") or plan.get("unitPrice"),
         expectedDelivery=action["expectedDelivery"], idempotencyKey=key,
-        recommendedQty=recommended_qty, reason=action.get("reason"))
+        recommendedQty=recommended_qty, reason=action.get("reason"), approvalId=approval_id)
 
     if not res.get("ok"):
         result["outcome"] = "WRITE_FAILED"
@@ -70,6 +74,43 @@ def execute_and_verify(platform, llm, run_id, action, plan, recommended_qty=None
 
     # something differs from what we intended. decide what to do about it.
     return _repair(platform, llm, result, verification, plan, action)
+
+
+def execute_transfer(platform, run_id, action, approval_id):
+    """Move stock between stores, after a buyer approved exactly this transfer.
+
+    No repair loop here. A transfer that does not verify goes straight back to a
+    buyer - the options are a different sender or a purchase, and both are
+    decisions operations owns.
+    """
+    result = {"action": action, "repairs": []}
+    key = idempotency_key(run_id, "transfer", action["sku"], int(action["qty"]))
+    res = platform.create_transfer(action["sku"], action["fromNode"], action["toNode"],
+                                   int(action["qty"]), key, approval_id)
+    if not res.get("ok"):
+        result.update(outcome="WRITE_FAILED", error=res.get("error"), detail=res.get("detail"))
+        return result
+
+    data = res["data"]
+    result["transferId"] = data.get("transferId")
+    if not data.get("executed"):
+        # refused by the platform - over the spare stock, no room, approval mismatch
+        result.update(outcome="REFUSED", detail=data.get("message"))
+        return result
+
+    verification = data.get("verification") or {}
+    result["verification"] = verification
+    if data.get("idempotent") or verification.get("outcome") == "VERIFIED":
+        result["outcome"] = "VERIFIED"
+        return result
+
+    platform.request_approval(
+        reason="transfer %s was made but did not verify: %s" % (
+            data.get("transferId"), "; ".join(verification.get("notes", [])) or "see the trace"),
+        riskTier="T3", proposedAction={"transferId": data.get("transferId"),
+                                       "verification": verification})
+    result["outcome"] = "ESCALATED"
+    return result
 
 
 def _repair(platform, llm, result, verification, plan, action):
@@ -111,26 +152,36 @@ def _repair(platform, llm, result, verification, plan, action):
         if kind in ("amend", "split", "cancel_and_recreate"):
             po = platform.po(po_id)
             version = (po.get("data") or {}).get("version", 0)
-            new_qty = int(choice.get("qty") or 0)
-
             if kind == "cancel_and_recreate":
                 platform.cancel_po(po_id, version, choice.get("reasoning", "replacing"))
                 result["outcome"] = "CANCELLED"
                 return result
+
+            new_qty = int(choice.get("qty") or 0)
+            if new_qty <= 0:
+                # a live run amended an order to 0 because the model left the
+                # quantity out. a repair without its number is not a repair
+                result["repairs"][-1]["overridden"] = "refused: %s needs a quantity" % kind
+                continue
 
             amended = platform.amend_po(po_id, new_qty, version,
                                         choice.get("reasoning", "correcting after verification"))
             result["repairs"][-1]["applied"] = amended.get("data")
 
             if not (amended.get("data") or {}).get("executed"):
-                # usually a stale version - somebody changed it under us. re-read
-                # and try once more rather than forcing it.
+                # a stale version, or the platform's rules refused the new quantity.
+                # either way, think again rather than forcing it
                 continue
 
-            recheck = platform.po(po_id)
-            result["verification_after_repair"] = recheck.get("data")
-            result["outcome"] = "REPAIRED"
-            return result
+            # never trust the amend's own "ok" either - check the order again, all
+            # three levels, against the corrected intent
+            verification = platform.verify_po(po_id, {**action, "qty": new_qty}).get("data") or {}
+            result["verification_after_repair"] = verification
+            if verification.get("outcome") == "VERIFIED":
+                result["outcome"] = "REPAIRED"
+                return result
+            mismatches = [d for d in verification.get("diffs", []) if not d.get("ok")]
+            continue
 
         result["repairs"][-1]["error"] = f"unknown repair {kind}"
 
@@ -172,7 +223,7 @@ def _choose_repair(llm, verification, mismatches, plan, action, attempt):
                              ("recommendedQty", "targetPosition", "inventoryPosition",
                               "meanDailyDemand", "unitPrice")}, default=str))),
     ]
-    res = llm.invoke(msgs, tools=[choose_repair])
+    res = llm.invoke(msgs, tools=[choose_repair], label="repair")
     calls = getattr(res, "tool_calls", None) or []
     if not calls:
         return {"repair": "escalate",
