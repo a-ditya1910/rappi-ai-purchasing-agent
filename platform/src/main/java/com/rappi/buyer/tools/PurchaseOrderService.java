@@ -10,6 +10,7 @@ import com.rappi.buyer.domain.PoLine;
 import com.rappi.buyer.domain.PoStatus;
 import com.rappi.buyer.domain.Product;
 import com.rappi.buyer.domain.PurchaseOrder;
+import com.rappi.buyer.domain.Supplier;
 import com.rappi.buyer.domain.SupplierEvent;
 import com.rappi.buyer.planner.ReorderPlan;
 import com.rappi.buyer.planner.ReorderPlanner;
@@ -19,6 +20,7 @@ import com.rappi.buyer.repo.InventoryRepo;
 import com.rappi.buyer.repo.ProductRepo;
 import com.rappi.buyer.repo.PurchaseOrderRepo;
 import com.rappi.buyer.repo.SupplierEventRepo;
+import com.rappi.buyer.repo.SupplierRepo;
 import com.rappi.buyer.supplier.SupplierMockService;
 
 import jakarta.persistence.EntityManager;
@@ -67,6 +69,7 @@ public class PurchaseOrderService {
     private final InventoryRepo inventory;
     private final ApprovalRepo approvals;
     private final SupplierEventRepo events;
+    private final SupplierRepo suppliers;
     private final ReorderPlanner planner;
     private final ConstraintEngine constraints;
     private final SupplierMockService supplierApi;
@@ -76,7 +79,7 @@ public class PurchaseOrderService {
 
     public PurchaseOrderService(PurchaseOrderRepo purchaseOrders, ProductRepo products,
                                 BudgetRepo budgets, InventoryRepo inventory, ApprovalRepo approvals,
-                                SupplierEventRepo events, ReorderPlanner planner, ConstraintEngine constraints,
+                                SupplierEventRepo events, SupplierRepo suppliers, ReorderPlanner planner, ConstraintEngine constraints,
                                 SupplierMockService supplierApi, ObjectMapper json,
                                 EntityManager em, Clock clock) {
         this.purchaseOrders = purchaseOrders;
@@ -85,6 +88,7 @@ public class PurchaseOrderService {
         this.inventory = inventory;
         this.approvals = approvals;
         this.events = events;
+        this.suppliers = suppliers;
         this.planner = planner;
         this.constraints = constraints;
         this.supplierApi = supplierApi;
@@ -411,6 +415,107 @@ public class PurchaseOrderService {
         } catch (Exception e) {
             return "{}";
         }
+    }
+
+    /**
+     * New reliability after one delivery: a moving average, so a single bad
+     * delivery lowers the score without wiping out a long good record.
+     *
+     *   observed = 0.7 x fill rate + 0.3 x on time
+     *   new      = 0.8 x old + 0.2 x observed
+     */
+    public static BigDecimal nextReliability(BigDecimal old, double fillRate, boolean onTime) {
+        double observed = 0.7 * Math.max(0, Math.min(1.0, fillRate)) + 0.3 * (onTime ? 1 : 0);
+        return BigDecimal.valueOf(0.8 * old.doubleValue() + 0.2 * observed).setScale(3, RoundingMode.HALF_UP);
+    }
+
+    /**
+     * Goods arrived at the store. The slow feedback loop: stock and money move,
+     * and the supplier's reliability learns from what actually turned up - which
+     * then changes the constraint checks, the supplier ranking and the mock on
+     * the next decision, with no model involved.
+     *
+     * On time is judged against the date the supplier's own lead time promised,
+     * not the PO's current due date - a supplier that slips moves that date itself,
+     * and would otherwise grade itself on time.
+     */
+    @Transactional
+    public Map<String, Object> receive(String poId, int qtyReceived, LocalDate receivedDate) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        PurchaseOrder po = purchaseOrders.findById(poId).orElse(null);
+        if (po == null) {
+            return refused(out, "NO_PO", "unknown purchase order " + poId);
+        }
+        if (po.getStatus() == PoStatus.RECEIVED || po.getStatus() == PoStatus.CANCELLED) {
+            return refused(out, "PO_CLOSED", poId + " is already " + po.getStatus());
+        }
+        PoLine line = po.getLines().get(0);
+        if (qtyReceived < 0 || qtyReceived > line.getQtyOrdered()) {
+            return refused(out, "QTY_OUT_OF_RANGE",
+                    "%d received against %d ordered".formatted(qtyReceived, line.getQtyOrdered()));
+        }
+
+        Supplier supplier = suppliers.findById(po.getSupplierId()).orElseThrow();
+        LocalDate promised = LocalDate.ofInstant(po.getCreatedAt(), clock.getZone())
+                .plusDays(supplier.getLeadTimeDays());
+        boolean onTime = !receivedDate.isAfter(promised);
+        double fill = qtyReceived / (double) line.getQtyOrdered();
+        BigDecimal before = supplier.getReliabilityScore();
+        BigDecimal after = nextReliability(before, fill, onTime);
+        supplier.setReliabilityScore(after);
+        suppliers.save(supplier);
+
+        int open = open(line);
+        line.setQtyReceived(qtyReceived);
+        po.setStatus(PoStatus.RECEIVED);
+
+        inventory.findByNodeIdAndSku(po.getNodeId(), line.getSku()).ifPresent(i -> {
+            i.setOnHand(i.getOnHand() + qtyReceived);
+            i.setInTransit(Math.max(0, i.getInTransit() - open));
+            inventory.save(i);
+        });
+
+        // committed money becomes spent money, for what actually arrived
+        Product product = products.findById(line.getSku()).orElseThrow();
+        BigDecimal paid = line.getUnitPrice().multiply(BigDecimal.valueOf(qtyReceived));
+        commitBudget(po.getNodeId(), product.getCategory(), po.getTotalValue().negate());
+        spend(po.getNodeId(), product.getCategory(), paid);
+        purchaseOrders.saveAndFlush(po);
+
+        SupplierEvent e = new SupplierEvent();
+        e.setPoId(poId);
+        e.setType("RECEIPT");
+        e.setPayload(toJson(Map.of("qtyReceived", qtyReceived, "fillRate", round3(fill),
+                "onTime", onTime, "promised", promised.toString(), "receivedDate", receivedDate.toString(),
+                "reliabilityBefore", before, "reliabilityAfter", after)));
+        e.setPayloadHash(sha256(poId + "|" + qtyReceived + "|" + receivedDate));
+        e.setReceivedAt(Instant.now(clock));
+        e.setSender(po.getSupplierId());
+        e.setApplied(true);
+        events.save(e);
+
+        out.put("applied", true);
+        out.put("poId", poId);
+        out.put("supplierId", po.getSupplierId());
+        out.put("qtyReceived", qtyReceived);
+        out.put("fillRate", round3(fill));
+        out.put("onTime", onTime);
+        out.put("promised", promised);
+        out.put("reliabilityBefore", before);
+        out.put("reliabilityAfter", after);
+        return out;
+    }
+
+    private void spend(String nodeId, String category, BigDecimal amount) {
+        String period = "%04d-%02d".formatted(LocalDate.now(clock).getYear(), LocalDate.now(clock).getMonthValue());
+        budgets.findByNodeIdAndCategoryAndPeriod(nodeId, category, period).ifPresent(b -> {
+            b.setSpent(b.getSpent().add(amount));
+            budgets.save(b);
+        });
+    }
+
+    private static double round3(double v) {
+        return Math.round(v * 1000.0) / 1000.0;
     }
 
     /**

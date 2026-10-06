@@ -120,6 +120,25 @@ public class TransferService {
         return new Result(true, false, t.getId(), "in transit, arrives " + arrival);
     }
 
+    /** The stock lands at the receiving store: on its shelf now, no longer on its way. */
+    @Transactional
+    public Result receive(String id) {
+        TransferOrder t = transfers.findById(id).orElse(null);
+        if (t == null) {
+            return refused("unknown transfer " + id);
+        }
+        if (t.getStatus() != TransferOrder.Status.IN_TRANSIT) {
+            return refused(id + " is already " + t.getStatus());
+        }
+        Inventory receiver = inventory.findByNodeIdAndSku(t.getToNode(), t.getSku()).orElseThrow();
+        receiver.setOnHand(receiver.getOnHand() + t.getQty());
+        receiver.setInTransit(Math.max(0, receiver.getInTransit() - t.getQty()));
+        inventory.save(receiver);
+        t.setStatus(TransferOrder.Status.RECEIVED);
+        transfers.saveAndFlush(t);
+        return new Result(true, false, id, "%d %s received at %s".formatted(t.getQty(), t.getSku(), t.getToNode()));
+    }
+
     /** Straight from mysql, for the same reason as PurchaseOrderService.reread. */
     @Transactional(readOnly = true)
     public TransferOrder reread(String id) {
