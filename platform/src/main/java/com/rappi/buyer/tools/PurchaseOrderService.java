@@ -10,6 +10,7 @@ import com.rappi.buyer.domain.PoLine;
 import com.rappi.buyer.domain.PoStatus;
 import com.rappi.buyer.domain.Product;
 import com.rappi.buyer.domain.PurchaseOrder;
+import com.rappi.buyer.domain.SupplierEvent;
 import com.rappi.buyer.planner.ReorderPlan;
 import com.rappi.buyer.planner.ReorderPlanner;
 import com.rappi.buyer.repo.ApprovalRepo;
@@ -17,6 +18,7 @@ import com.rappi.buyer.repo.BudgetRepo;
 import com.rappi.buyer.repo.InventoryRepo;
 import com.rappi.buyer.repo.ProductRepo;
 import com.rappi.buyer.repo.PurchaseOrderRepo;
+import com.rappi.buyer.repo.SupplierEventRepo;
 import com.rappi.buyer.supplier.SupplierMockService;
 
 import jakarta.persistence.EntityManager;
@@ -29,9 +31,14 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
 
@@ -59,6 +66,7 @@ public class PurchaseOrderService {
     private final BudgetRepo budgets;
     private final InventoryRepo inventory;
     private final ApprovalRepo approvals;
+    private final SupplierEventRepo events;
     private final ReorderPlanner planner;
     private final ConstraintEngine constraints;
     private final SupplierMockService supplierApi;
@@ -68,7 +76,7 @@ public class PurchaseOrderService {
 
     public PurchaseOrderService(PurchaseOrderRepo purchaseOrders, ProductRepo products,
                                 BudgetRepo budgets, InventoryRepo inventory, ApprovalRepo approvals,
-                                ReorderPlanner planner, ConstraintEngine constraints,
+                                SupplierEventRepo events, ReorderPlanner planner, ConstraintEngine constraints,
                                 SupplierMockService supplierApi, ObjectMapper json,
                                 EntityManager em, Clock clock) {
         this.purchaseOrders = purchaseOrders;
@@ -76,6 +84,7 @@ public class PurchaseOrderService {
         this.budgets = budgets;
         this.inventory = inventory;
         this.approvals = approvals;
+        this.events = events;
         this.planner = planner;
         this.constraints = constraints;
         this.supplierApi = supplierApi;
@@ -196,8 +205,25 @@ public class PurchaseOrderService {
             return new WriteResult(false, false, poId, null,
                     "cannot amend an order that is " + po.getStatus());
         }
+        if (newQty < 1) {
+            // an order of 0 that still says CONFIRMED is a cancel nobody can see
+            return new WriteResult(false, false, poId, null,
+                    "cannot amend to %d units, use cancel-po to cancel it".formatted(newQty));
+        }
 
         PoLine line = po.getLines().get(0);
+
+        // the rules run on an amend too. a live repair once amended an order to 0,
+        // below the supplier minimum, and nothing stopped it. post state, because
+        // this order is already in the position and the budget
+        ReorderPlan plan = planner.plan(line.getSku(), po.getNodeId(), po.getSupplierId());
+        ValidationReport report = constraints.validate(new Proposal(line.getSku(), po.getNodeId(),
+                po.getSupplierId(), newQty, line.getUnitPrice(), po.getExpectedDelivery(), null), plan, true);
+        if (!report.blocking().isEmpty()) {
+            return new WriteResult(false, false, poId, report,
+                    "blocked: " + String.join("; ", report.blocking()));
+        }
+
         int openBefore = open(line);
         BigDecimal before = po.getTotalValue();
         line.setQtyOrdered(newQty);
@@ -243,6 +269,147 @@ public class PurchaseOrderService {
         po.setStatus(PoStatus.CANCELLED);
         purchaseOrders.saveAndFlush(po);
         return new WriteResult(true, false, poId, null, reason);
+    }
+
+    private static final BigDecimal PRICE_SUSPECT = new BigDecimal("0.25");
+
+    /**
+     * A supplier's message about an order, already read by the agent. Nothing the
+     * model extracted is trusted: the order must exist and be open, the sender must
+     * be that order's supplier, the quantity must make sense and the price must be
+     * believable. Only then does it change the order - and in_transit and the
+     * budget move with it, in the same transaction.
+     *
+     * The same message sent twice is recognised by its hash and changes nothing.
+     */
+    @Transactional
+    public Map<String, Object> applySupplierEvent(String poId, String sender, String kind,
+                                                  Integer confirmedQty, LocalDate confirmedDelivery,
+                                                  BigDecimal unitPrice, String rawText, String runId) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        PurchaseOrder po = purchaseOrders.findById(poId).orElse(null);
+        if (po == null) {
+            return refused(out, "NO_PO", "unknown purchase order " + poId);
+        }
+
+        String hash = sha256(rawText == null ? kind + confirmedQty + confirmedDelivery + unitPrice : rawText);
+        if (events.findByPoIdAndTypeAndPayloadHash(poId, kind, hash).isPresent()) {
+            out.put("applied", false);
+            out.put("duplicate", true);
+            out.put("poId", poId);
+            return out;
+        }
+
+        PoLine line = po.getLines().get(0);
+        String problem = null;
+        if (!po.getSupplierId().equals(sender)) {
+            // the basic version of checking who sent an email. a message about
+            // somebody else's order is not one we act on
+            problem = "SENDER_MISMATCH: %s is %s's order, not %s'".formatted(poId, po.getSupplierId(), sender);
+        } else if (!po.getStatus().isOpen()) {
+            problem = "PO_CLOSED: %s is %s".formatted(poId, po.getStatus());
+        } else if (confirmedDelivery != null && confirmedDelivery.isBefore(LocalDate.now(clock))) {
+            // "arrive on 14 March" with no year was once read as last year. a past
+            // date makes the delivery vanish from every forward simulation
+            problem = "DATE_IN_PAST: delivery %s is before today %s".formatted(
+                    confirmedDelivery, LocalDate.now(clock));
+        } else if (confirmedQty != null && (confirmedQty < 0 || confirmedQty > line.getQtyOrdered())) {
+            problem = "QTY_OUT_OF_RANGE: %d confirmed against %d ordered".formatted(confirmedQty, line.getQtyOrdered());
+        } else if (unitPrice != null && unitPrice.subtract(line.getUnitPrice()).abs()
+                .divide(line.getUnitPrice(), 4, RoundingMode.HALF_UP).compareTo(PRICE_SUSPECT) > 0) {
+            problem = "PRICE_SUSPECT: %s against the ordered %s, over 25%% apart".formatted(unitPrice, line.getUnitPrice());
+        }
+
+        SupplierEvent e = new SupplierEvent();
+        e.setPoId(poId);
+        e.setType(kind);
+        e.setPayload(toJson(Map.of("kind", kind,
+                "confirmedQty", String.valueOf(confirmedQty),
+                "confirmedDelivery", String.valueOf(confirmedDelivery),
+                "unitPrice", String.valueOf(unitPrice))));
+        e.setPayloadHash(hash);
+        e.setReceivedAt(Instant.now(clock));
+        e.setSender(sender);
+        e.setAgentRunId(runId);
+        e.setRawText(rawText);
+        e.setApplied(problem == null);
+        e.setNote(problem);
+        events.save(e);
+
+        if (problem != null) {
+            return refused(out, problem.substring(0, problem.indexOf(':')), problem);
+        }
+
+        Map<String, Object> before = snapshot(po, line);
+        int openBefore = open(line);
+        BigDecimal valueBefore = po.getTotalValue();
+
+        if (confirmedQty != null) {
+            line.setQtyConfirmed(confirmedQty);
+            po.setStatus(confirmedQty == 0 ? PoStatus.CANCELLED
+                    : confirmedQty < line.getQtyOrdered() ? PoStatus.PARTIALLY_CONFIRMED
+                    : PoStatus.CONFIRMED);
+        }
+        if (unitPrice != null) {
+            line.setUnitPrice(unitPrice);
+        }
+        if (confirmedDelivery != null) {
+            po.setExpectedDelivery(confirmedDelivery);
+        }
+        int openAfter = po.getStatus() == PoStatus.CANCELLED ? 0 : open(line);
+        po.setTotalValue(line.getUnitPrice().multiply(BigDecimal.valueOf(openAfter)));
+
+        Product product = products.findById(line.getSku()).orElseThrow();
+        commitBudget(po.getNodeId(), product.getCategory(), po.getTotalValue().subtract(valueBefore));
+        moveInTransit(po.getNodeId(), line.getSku(), openAfter - openBefore);
+        purchaseOrders.saveAndFlush(po);
+
+        out.put("applied", true);
+        out.put("duplicate", false);
+        out.put("eventId", e.getId());
+        out.put("poId", poId);
+        out.put("sku", line.getSku());
+        out.put("nodeId", po.getNodeId());
+        out.put("supplierId", po.getSupplierId());
+        out.put("before", before);
+        out.put("after", snapshot(po, line));
+        out.put("shortfall", line.getQtyOrdered() - openAfter);
+        return out;
+    }
+
+    private static Map<String, Object> refused(Map<String, Object> out, String code, String detail) {
+        out.put("applied", false);
+        out.put("error", code);
+        out.put("detail", detail);
+        return out;
+    }
+
+    private static Map<String, Object> snapshot(PurchaseOrder po, PoLine line) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("status", po.getStatus());
+        m.put("qtyOrdered", line.getQtyOrdered());
+        m.put("qtyConfirmed", line.getQtyConfirmed());
+        m.put("unitPrice", line.getUnitPrice());
+        m.put("expectedDelivery", po.getExpectedDelivery());
+        m.put("totalValue", po.getTotalValue());
+        return m;
+    }
+
+    private static String sha256(String text) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(text.getBytes(StandardCharsets.UTF_8)));
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private String toJson(Object o) {
+        try {
+            return json.writeValueAsString(o);
+        } catch (Exception e) {
+            return "{}";
+        }
     }
 
     /**

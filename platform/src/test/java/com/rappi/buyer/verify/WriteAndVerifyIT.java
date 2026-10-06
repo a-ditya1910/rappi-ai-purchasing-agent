@@ -224,14 +224,36 @@ class WriteAndVerifyIT {
         PurchaseOrder po = orders.reread(res.poId());
         int current = po.getVersion();
 
-        WriteResult stale = orders.amend(res.poId(), 120, current - 1, "should not apply");
+        // 264 = 11 cases of 24, above the 240 minimum. the old test amended to 120,
+        // below the minimum, which only passed because amend skipped the rules
+        WriteResult stale = orders.amend(res.poId(), 264, current - 1, "should not apply");
         assertThat(stale.executed()).isFalse();
         assertThat(stale.message()).contains("STALE_VERSION");
 
-        WriteResult fresh = orders.amend(res.poId(), 120, current, "correct version");
+        WriteResult fresh = orders.amend(res.poId(), 264, current, "correct version");
         assertThat(fresh.executed()).isTrue();
 
         orders.cancel(res.poId(), orders.reread(res.poId()).getVersion(), "cleanup");
+    }
+
+    @Test
+    @DisplayName("an amend goes through the rules: below the minimum or to zero is refused")
+    void amendIsValidated() {
+        WriteResult res = orders.create("SKU-CHIPS-150G", NODE, "SUP-SNACKCO", 240,
+                new BigDecimal("0.62"), LocalDate.of(2026, 3, 24), key(), 240, null, "test");
+        assertThat(res.executed()).as(res.message()).isTrue();
+        int v = orders.reread(res.poId()).getVersion();
+
+        WriteResult belowMoq = orders.amend(res.poId(), 120, v, "half");
+        assertThat(belowMoq.executed()).isFalse();
+        assertThat(belowMoq.message()).contains("MOQ");
+
+        WriteResult zero = orders.amend(res.poId(), 0, v, "nothing");
+        assertThat(zero.executed()).isFalse();
+        assertThat(zero.message()).contains("cancel-po");
+
+        assertThat(orders.reread(res.poId()).getLines().get(0).getQtyOrdered()).isEqualTo(240);
+        cleanup(res);
     }
 
     @Test

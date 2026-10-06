@@ -56,6 +56,7 @@ class State(TypedDict, total=False):
     facts: dict
     retrieved: list
     searches: list
+    options: list
     analysis: dict
     proposal: dict
     validation: dict
@@ -126,19 +127,32 @@ def build(platform, llm, kb=None):
     def analyse(state):
         """No model here at all. Pure arithmetic from the platform."""
         sit = state["situation"]
-        supplier = sit.get("supplier_id") or _pick_supplier(state)
-        if not supplier:
-            state["errors"].append("no supplier could be determined for this sku")
-            state["analysis"] = {}
-            return state
 
-        res = platform.calculate_reorder(sit["sku"], sit["node_id"], supplier)
-        if not res.get("ok"):
-            state["errors"].append(f"calculate-reorder failed: {res.get('error')}")
-            state["analysis"] = {}
-            return state
+        if state["scenario"] == "S2_PARTIAL":
+            # the supplier just shipped short, so planning against it alone answers
+            # the wrong question. rank everyone who stocks the sku, each with its
+            # own plan, and start from the best usable one
+            res = platform.supplier_options(sit["sku"], sit["node_id"])
+            usable = [o for o in (res.get("data") or []) if o.get("usable")]
+            if not usable:
+                state["errors"].append(f"no usable supplier options: {res.get('error')}")
+                state["analysis"] = {}
+                return state
+            state["options"] = res["data"]
+            plan, supplier = usable[0]["plan"], usable[0]["supplierId"]
+        else:
+            supplier = sit.get("supplier_id") or _pick_supplier(state)
+            if not supplier:
+                state["errors"].append("no supplier could be determined for this sku")
+                state["analysis"] = {}
+                return state
 
-        plan = res["data"]
+            res = platform.calculate_reorder(sit["sku"], sit["node_id"], supplier)
+            if not res.get("ok"):
+                state["errors"].append(f"calculate-reorder failed: {res.get('error')}")
+                state["analysis"] = {}
+                return state
+            plan = res["data"]
         state["analysis"] = plan
         state["situation"]["supplier_id"] = supplier
 
@@ -193,6 +207,7 @@ def build(platform, llm, kb=None):
                     retrieved="\n\n".join(state.get("retrieved") or [])
                               or "(nothing was retrieved)",
                     analysis="\n".join(plan.get("explanationSteps", [])),
+                    options=_options_block(state.get("options")),
                     recommendation_line=rec_line))]
 
         res = llm.invoke(msgs, tools=[_decision_tool()], label="propose")
@@ -201,9 +216,10 @@ def build(platform, llm, kb=None):
 
     def preflight(state):
         """Deterministic. The model's opinion of whether it may act is not consulted."""
+        _apply_supplier_choice(state)
         p = state.get("proposal") or {}
         plan = state.get("analysis") or {}
-        qty = p.get("qty") or plan.get("recommendedQty") or 0
+        qty = p.get("qty") or 0
 
         if p.get("decision") in ("INVESTIGATE", "REJECT") or qty <= 0:
             state["validation"] = {"verdict": "NOT_APPLICABLE",
@@ -235,7 +251,8 @@ def build(platform, llm, kb=None):
         # the store will run short. a wrong "do nothing" empties a shelf just as
         # surely as a wrong order overfills one, so a buyer gets to confirm it
         need, legal = plan.get("rawNeed") or 0, plan.get("recommendedQty") or 0
-        if p.get("decision") in ("REJECT", "INVESTIGATE") and need > 0 and legal > 0:
+        no_order = p.get("decision") in ("REJECT", "INVESTIGATE") or (p.get("qty") or 0) <= 0
+        if no_order and need > 0 and legal > 0:
             action = {
                 "sku": sit["sku"], "nodeId": sit["node_id"],
                 "supplierId": sit["supplier_id"], "qty": legal,
@@ -330,6 +347,7 @@ def _read_tools(platform, kb):
           supplier  a supplier's capacity and behaviour (add supplier_id)
           product   storage, shelf life, demand notes
           decision  what was decided before for this product (add sku)
+          supplier_message  what a supplier told us before (add supplier_id)
         Cite the ref of anything you rely on."""
         filters = {k: v for k, v in (("doc_type", doc_type), ("sku", sku),
                                      ("supplier_id", supplier_id)) if v}
@@ -407,14 +425,17 @@ def _read_tools(platform, kb):
 def _decision_tool():
     @tool
     def record_decision(decision: str, reasoning: str, key_factors: list,
-                        confidence: float, qty: int = 0,
-                        assumptions: list = None, citations: list = None) -> dict:
+                        confidence: float, qty: int = None,
+                        assumptions: list = None, citations: list = None,
+                        supplier_id: str = None) -> dict:
         """Record the purchasing decision.
 
         decision must be one of ACCEPT, MODIFY, REJECT, INVESTIGATE, ESCALATE.
-        qty is the quantity to order, 0 if nothing should be ordered.
+        qty is the quantity to order. Leave it out to use the planner's quantity;
+        0 means order nothing.
         assumptions are anything you took on faith rather than verified.
         citations are the refs of the reference documents the decision relies on.
+        supplier_id: only when supplier options were given - which one to order from.
         """
         return {"ok": True}
 
@@ -484,13 +505,56 @@ def _extract_decision(res, plan):
         if args.get("decision") in ("REJECT", "INVESTIGATE"):
             # nothing is ordered for these, so the record should not say "REJECT 204"
             args["qty"] = 0
-        elif not args.get("qty"):
+        elif args.get("qty") is None:
+            # left out means "the planner's number". 0 stays 0 - a live run said
+            # MODIFY, wrote "no order is needed", and got the planner's 170 placed
             args["qty"] = plan.get("recommendedQty", 0)
         return args
     # model answered in prose instead of calling the tool
     return {"decision": "INVESTIGATE",
             "reasoning": getattr(res, "content", "") or "no structured decision returned",
             "key_factors": [], "confidence": 0.0, "qty": 0}
+
+
+def _apply_supplier_choice(state):
+    """The model may pick a different supplier from the ranked options. Its plan
+    then replaces the default one - quantity, price and lead time all come from
+    that supplier's own calculation. A supplier that was not on the list is
+    ignored rather than trusted."""
+    p = state.get("proposal") or {}
+    chosen = p.get("supplier_id")
+    sit = state["situation"]
+    if not chosen or chosen == sit.get("supplier_id") or not state.get("options"):
+        return
+    opts = {o["supplierId"]: o for o in state["options"] if o.get("usable")}
+    if chosen not in opts:
+        state["errors"].append(f"model chose {chosen}, which is not a usable option - ignored")
+        return
+    old = state.get("analysis") or {}
+    new = opts[chosen]["plan"]
+    # a quantity the model left to the planner follows the new supplier's planner
+    if p.get("qty") == old.get("recommendedQty"):
+        p["qty"] = new.get("recommendedQty")
+    state["analysis"] = new
+    sit["supplier_id"] = chosen
+
+
+def _options_block(options):
+    if not options:
+        return ""
+    lines = ["SUPPLIER OPTIONS (ranked by weighted penalty, lower is better; "
+             "set supplier_id to choose one)"]
+    for o in options:
+        if not o.get("usable"):
+            lines.append(f"  {o['supplierId']}: not usable - {o.get('note')}")
+            continue
+        pl = o["plan"]
+        lines.append(
+            f"  {o['supplierId']}: score {o['score']} {o['parts']} | order {pl['recommendedQty']} "
+            f"at {pl['unitPrice']} = {pl['estimatedCost']} | lead {pl['leadTimeDays']}d "
+            f"| ships up to {o.get('maxDailyCapacity')}/day"
+            + (f" | {o['note']}" if o.get("note") else ""))
+    return "\n".join(lines)
 
 
 def _explain(p):
@@ -508,4 +572,5 @@ def _stats(llm, state):
 def _delivery_date(plan):
     import datetime
     days = plan.get("leadTimeDays", 7)
-    return (datetime.date(2026, 3, 10) + datetime.timedelta(days=days)).isoformat()
+    today = datetime.date.fromisoformat(cfg.sim_date)
+    return (today + datetime.timedelta(days=days)).isoformat()

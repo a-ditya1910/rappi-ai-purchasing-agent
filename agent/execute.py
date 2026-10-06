@@ -115,26 +115,36 @@ def _repair(platform, llm, result, verification, plan, action):
         if kind in ("amend", "split", "cancel_and_recreate"):
             po = platform.po(po_id)
             version = (po.get("data") or {}).get("version", 0)
-            new_qty = int(choice.get("qty") or 0)
-
             if kind == "cancel_and_recreate":
                 platform.cancel_po(po_id, version, choice.get("reasoning", "replacing"))
                 result["outcome"] = "CANCELLED"
                 return result
+
+            new_qty = int(choice.get("qty") or 0)
+            if new_qty <= 0:
+                # a live run amended an order to 0 because the model left the
+                # quantity out. a repair without its number is not a repair
+                result["repairs"][-1]["overridden"] = "refused: %s needs a quantity" % kind
+                continue
 
             amended = platform.amend_po(po_id, new_qty, version,
                                         choice.get("reasoning", "correcting after verification"))
             result["repairs"][-1]["applied"] = amended.get("data")
 
             if not (amended.get("data") or {}).get("executed"):
-                # usually a stale version - somebody changed it under us. re-read
-                # and try once more rather than forcing it.
+                # a stale version, or the platform's rules refused the new quantity.
+                # either way, think again rather than forcing it
                 continue
 
-            recheck = platform.po(po_id)
-            result["verification_after_repair"] = recheck.get("data")
-            result["outcome"] = "REPAIRED"
-            return result
+            # never trust the amend's own "ok" either - check the order again, all
+            # three levels, against the corrected intent
+            verification = platform.verify_po(po_id, {**action, "qty": new_qty}).get("data") or {}
+            result["verification_after_repair"] = verification
+            if verification.get("outcome") == "VERIFIED":
+                result["outcome"] = "REPAIRED"
+                return result
+            mismatches = [d for d in verification.get("diffs", []) if not d.get("ok")]
+            continue
 
         result["repairs"][-1]["error"] = f"unknown repair {kind}"
 

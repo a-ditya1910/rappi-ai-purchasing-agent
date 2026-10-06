@@ -149,13 +149,13 @@ def search(query, doc_type=None, sku=None, supplier_id=None, k=4, store=None):
     } for d, dist in hits]}
 
 
-def remember(ref, text, store=None, **meta):
+def remember(ref, text, store=None, kind="decision", **meta):
     # the agent's own history goes in the same index, so "what happened the last
     # time we bought this" is one search away. same ref = same row, so an approval
     # outcome later overwrites the run's note instead of adding a second one
     try:
         (store or get_store()).add_documents([Document(page_content=text, metadata={
-            "doc_type": "decision", "ref": ref, "source": "memory", **meta})], ids=[ref])
+            "doc_type": kind, "ref": ref, "source": "memory", **meta})], ids=[ref])
     except Exception as e:
         log.warning("could not remember %s: %s", ref, e)
 

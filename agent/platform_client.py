@@ -17,6 +17,15 @@ class PlatformError(Exception):
     pass
 
 
+def start_run(scenario, base_url=None, **fields):
+    """Opens a run so everything after it has something to trace into. Used when
+    the agent starts work itself, like on an incoming supplier email."""
+    r = httpx.post(f"{(base_url or cfg.platform_url).rstrip('/')}/runs",
+                   json={"scenario": scenario, **fields}, timeout=30)
+    r.raise_for_status()
+    return r.json()["runId"]
+
+
 class Platform:
     def __init__(self, run_id, base_url=None, client=None):
         self.run_id = run_id
@@ -110,6 +119,13 @@ class Platform:
             "poId": poId, "newQty": newQty,
             "expectedVersion": expectedVersion, "reason": reason})
 
+    def verify_po(self, poId, action):
+        return self.post("/tools/verify-po", {
+            "poId": poId, "sku": action["sku"], "nodeId": action["nodeId"],
+            "supplierId": action["supplierId"], "qty": action["qty"],
+            "unitPrice": action.get("unitPrice"),
+            "expectedDelivery": action.get("expectedDelivery")})
+
     def cancel_po(self, poId, expectedVersion, reason):
         return self.post("/tools/cancel-po", {
             "poId": poId, "expectedVersion": expectedVersion, "reason": reason})
@@ -124,6 +140,15 @@ class Platform:
                 "explanation": explanation, "validationReport": validationReport}
         body.update(stats)     # llmCalls, tokensIn, tokensOut, durationMs
         return self.post("/tools/record-decision", body)
+
+    def supplier_options(self, sku, nodeId):
+        return self.get("/tools/supplier-options", sku=sku, nodeId=nodeId)
+
+    def supplier_event(self, poId, sender, kind, confirmedQty=None, confirmedDelivery=None,
+                       unitPrice=None, rawText=None):
+        return self.post("/tools/supplier-event", {
+            "poId": poId, "sender": sender, "kind": kind, "confirmedQty": confirmedQty,
+            "confirmedDelivery": confirmedDelivery, "unitPrice": unitPrice, "rawText": rawText})
 
     def demand_anomaly(self, sku, nodeId, lookbackDays=60):
         return self.get("/tools/demand-anomaly", sku=sku, nodeId=nodeId, lookbackDays=lookbackDays)

@@ -80,6 +80,7 @@ services:
       PLATFORM_BASE_URL: http://platform:8080
       REDIS_HOST: redis
       VECTOR_DB_URL: postgresql+psycopg://rag:rag@vectordb:5432/rag
+      SIM_DATE: ${SIM_DATE:-2026-03-10}
     ports:
       - "8100:8100"
 

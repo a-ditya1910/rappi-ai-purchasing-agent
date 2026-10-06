@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { api, SCENARIOS } from './api.js'
 import Console from './Console.jsx'
 import Approvals from './Approvals.jsx'
+import Inbox from './Inbox.jsx'
 import Trace from './Trace.jsx'
 
 export default function App() {
@@ -27,6 +28,9 @@ export default function App() {
           <button className={tab === 'console' ? 'on' : ''} onClick={() => setTab('console')}>
             Console
           </button>
+          <button className={tab === 'inbox' ? 'on' : ''} onClick={() => setTab('inbox')}>
+            Inbox
+          </button>
           <button className={tab === 'approvals' ? 'on' : ''} onClick={() => setTab('approvals')}>
             Approvals {pending > 0 && <span className="badge">{pending}</span>}
           </button>
@@ -38,6 +42,7 @@ export default function App() {
 
       {tab === 'console' && <Console scenarios={SCENARIOS} onRun={show} />}
       {tab === 'approvals' && <Approvals onOpen={show} />}
+      {tab === 'inbox' && <Inbox onOpen={show} />}
       {tab === 'trace' && <Trace runId={openRun} onPick={setOpenRun} />}
     </div>
   )

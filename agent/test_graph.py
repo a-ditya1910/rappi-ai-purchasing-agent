@@ -102,6 +102,12 @@ class FakePlatform:
         self.amended.append({"poId": poId, "newQty": newQty})
         return {"ok": True, "data": {"executed": True, "poId": poId}}
 
+    def verify_po(self, poId, action):
+        self.calls.append("/tools/verify-po")
+        self.reverified = action
+        return {"ok": True, "data": dict(getattr(self, "_reverify", {"outcome": "VERIFIED",
+                                                                   "diffs": [], "notes": []}))}
+
     def cancel_po(self, poId, expectedVersion, reason):
         self.calls.append("/tools/cancel-po")
         return {"ok": True, "data": {"executed": True, "poId": poId}}
@@ -136,6 +142,17 @@ class FakePlatform:
     def storage(self, nodeId, sku=None):          return self._ok("/tools/storage", {"freeCm3": 6000000})
     def po(self, poId):                           return self._ok("/tools/po", {"poId": poId, "version": 1})
     def demand_anomaly(self, sku, nodeId, l=60):  return self._ok("/tools/demand-anomaly", {"verdict": "REAL"})
+
+    def supplier_options(self, sku, nodeId):
+        def opt(sid, qty, price, lead, score):
+            return {"supplierId": sid, "usable": True, "score": score, "note": None,
+                    "parts": {"price": 0.0}, "maxDailyCapacity": 2000,
+                    "plan": {"recommendedQty": qty, "rawNeed": qty, "unitPrice": price,
+                             "estimatedCost": qty * price, "leadTimeDays": lead,
+                             "explanationSteps": [f"plan for {sid}"], "warnings": []}}
+        return self._ok("/tools/supplier-options", [
+            opt("SUP-ANDINA", 150, 3.90, 4, 0.04), opt("SUP-CAFEBR", 400, 4.40, 9, 0.09),
+            {"supplierId": "SUP-GONE", "usable": False, "note": "inactive, cannot order"}])
 
 
 def tool_call(name, args, cid="1"):
@@ -550,3 +567,126 @@ def test_a_reject_with_nothing_needed_stays_quiet():
     out = run(FakeLLM([gathered_everything()], decision("REJECT", qty=0)), platform)
     assert out["execution"]["outcome"] == "NO_ACTION"
     assert not platform.approvals
+
+
+
+# ---- scenario 2: a short shipment, and the choice of where the rest comes from
+
+def short_shipment():
+    return {"run_id": "r2", "scenario": "S2_PARTIAL", "facts": {}, "errors": [],
+            "situation": {"sku": "SKU-COFFEE-500G", "node_id": "NODE-BOG-01",
+                          "supplier_id": "SUP-ANDINA", "recommended_qty": None,
+                          "po_id": "PO-0031"}}
+
+
+def s2_gather():
+    return AIMessage(content="", tool_calls=[
+        {"name": "get_purchase_order", "args": {"po_id": "PO-0031"}, "id": "a"},
+        {"name": "get_inventory_position", "args": {"sku": "SKU-COFFEE-500G", "node_id": "NODE-BOG-01"}, "id": "b"},
+        {"name": "get_demand_forecast", "args": {"sku": "SKU-COFFEE-500G", "node_id": "NODE-BOG-01"}, "id": "c"},
+        {"name": "get_suppliers", "args": {"sku": "SKU-COFFEE-500G"}, "id": "d"},
+        {"name": "search_knowledge", "args": {"query": "partial", "doc_type": "policy"}, "id": "e"},
+    ])
+
+
+def picks(supplier_id, qty=None):
+    args = {"decision": "MODIFY", "confidence": 0.8, "key_factors": [],
+            "reasoning": "top up the shortfall", "supplier_id": supplier_id}
+    if qty is not None:
+        args["qty"] = qty
+    return tool_call("record_decision", args)
+
+
+def test_s2_ranks_suppliers_and_shows_them_to_the_model():
+    llm = FakeLLM([s2_gather()], picks(None))
+    platform = FakePlatform(validation=auto_approve())
+    out = run(llm, platform, state=short_shipment())
+
+    assert "/tools/supplier-options" in platform.calls
+    assert "/tools/calculate-reorder" not in platform.calls
+    assert "SUPPLIER OPTIONS" in llm.prompts_seen[-1]
+    assert "SUP-GONE: not usable" in llm.prompts_seen[-1]
+    assert out["analysis"]["recommendedQty"] == 150         # best ranked by default
+
+
+def test_s2_choosing_another_supplier_switches_to_its_own_plan():
+    llm = FakeLLM([s2_gather()], picks("SUP-CAFEBR"))
+    platform = FakePlatform(validation=auto_approve())
+    out = run(llm, platform, state=short_shipment())
+
+    assert platform.validated["supplierId"] == "SUP-CAFEBR"
+    assert platform.validated["qty"] == 400                 # cafebr's plan, not andina's
+    assert platform.validated["unitPrice"] == 4.40
+    assert platform.created[0]["supplierId"] == "SUP-CAFEBR"
+
+
+def test_s2_a_supplier_that_was_not_offered_is_ignored():
+    llm = FakeLLM([s2_gather()], picks("SUP-MADE-UP"))
+    platform = FakePlatform(validation=auto_approve())
+    out = run(llm, platform, state=short_shipment())
+
+    assert platform.validated["supplierId"] == "SUP-ANDINA"
+    assert any("SUP-MADE-UP" in e for e in out["errors"])
+
+
+
+# ---- live run fixes: no order means no order, repairs are re-checked --------
+
+def test_modify_with_qty_zero_does_not_place_the_planners_order():
+    # live: "no additional order is required", decision MODIFY, qty left as 0 ->
+    # the planner's 170 got ordered. 0 must mean 0
+    platform = FakePlatform(validation=auto_approve())
+    out = run(FakeLLM([gathered_everything()], decision("MODIFY", qty=0)), platform)
+
+    assert "/tools/create-po" not in platform.calls
+    assert out["execution"]["guard"] == "declined_despite_need"
+
+
+def test_modify_without_a_qty_takes_the_planners_number():
+    no_qty = tool_call("record_decision", {"decision": "MODIFY", "confidence": 0.8,
+                                           "reasoning": "planner is right", "key_factors": []})
+    out = run(FakeLLM([gathered_everything()], no_qty), FakePlatform())
+    assert out["proposal"]["qty"] == 204
+
+
+def mismatch(level="L3", field="stockoutDays"):
+    return {"outcome": "MISMATCH", "notes": [],
+            "diffs": [{"level": level, "field": field, "intended": "0", "actual": "8", "ok": False}]}
+
+
+def test_a_repair_without_a_quantity_is_refused_not_amended_to_zero():
+    platform = FakePlatform(validation=auto_approve(), verification=mismatch())
+    llm = FakeLLM([gathered_everything()], decision(),
+                  repair=tool_call("choose_repair", {"repair": "amend", "reasoning": "fix it"}))
+    out = run(llm, platform)
+
+    assert not platform.amended, "nothing may be amended to 0"
+    assert out["execution"]["outcome"] == "ESCALATED"
+    assert "needs a quantity" in out["execution"]["repairs"][0]["overridden"]
+
+
+def test_a_repair_is_verified_again_before_it_counts():
+    platform = FakePlatform(validation=auto_approve(), verification=mismatch())
+    platform._reverify = mismatch()                  # the amend did not fix the shelf
+    llm = FakeLLM([gathered_everything()], decision(),
+                  repair=tool_call("choose_repair", {"repair": "amend", "qty": 240,
+                                                     "reasoning": "a bit more"}))
+    out = run(llm, platform)
+
+    assert "/tools/verify-po" in platform.calls
+    assert platform.reverified["qty"] == 240
+    assert out["execution"]["outcome"] == "ESCALATED", "an amend that did not fix it is not REPAIRED"
+
+
+def test_the_extraction_prompt_knows_today():
+    import inbox
+    from langchain_core.messages import AIMessage as AI
+
+    class Seen:
+        def invoke(self, messages, tools=None, label=None):
+            self.prompt = messages[0].content
+            return AI(content="")
+
+    llm = Seen()
+    inbox.extract(llm, "SUP-ANDINA", "", "arrives 14 March")
+    assert "Today is 2026-03-10" in llm.prompt

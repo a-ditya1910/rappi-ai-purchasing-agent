@@ -14,6 +14,7 @@ import com.rappi.buyer.domain.SupplierProduct;
 import com.rappi.buyer.planner.DemandAnomalyDetector;
 import com.rappi.buyer.planner.ReorderPlan;
 import com.rappi.buyer.planner.ReorderPlanner;
+import com.rappi.buyer.planner.SupplierRanker;
 import com.rappi.buyer.repo.BudgetRepo;
 import com.rappi.buyer.repo.ForecastRepo;
 import com.rappi.buyer.repo.InventoryRepo;
@@ -69,6 +70,7 @@ public class ToolController {
     private final ReorderPlanner planner;
     private final ConstraintEngine constraints;
     private final DemandAnomalyDetector anomalies;
+    private final SupplierRanker ranker;
     private final Clock clock;
 
     public ToolController(ProductRepo products, NodeRepo nodes, SupplierRepo suppliers,
@@ -76,7 +78,7 @@ public class ToolController {
                           ForecastRepo forecasts, SalesRepo sales, BudgetRepo budgets,
                           PurchaseOrderRepo purchaseOrders, ReorderPlanner planner,
                           ConstraintEngine constraints, DemandAnomalyDetector anomalies,
-                          Clock clock) {
+                          SupplierRanker ranker, Clock clock) {
         this.products = products;
         this.nodes = nodes;
         this.suppliers = suppliers;
@@ -89,6 +91,7 @@ public class ToolController {
         this.planner = planner;
         this.constraints = constraints;
         this.anomalies = anomalies;
+        this.ranker = ranker;
         this.clock = clock;
     }
 
@@ -225,6 +228,13 @@ public class ToolController {
                 .map(r -> Map.of("date", r.getSaleDate(), "unitsSold", r.getUnitsSold()))
                 .toList());
         return ToolResponse.ok(out);
+    }
+
+    /** Every supplier for the sku, each with its own plan, ranked by weighted penalty. */
+    @GetMapping("/supplier-options")
+    public ToolResponse<List<SupplierRanker.Option>> supplierOptions(@RequestParam String sku,
+                                                                     @RequestParam String nodeId) {
+        return ToolResponse.ok(ranker.rank(sku, nodeId));
     }
 
     @GetMapping("/demand-anomaly")

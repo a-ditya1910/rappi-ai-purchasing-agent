@@ -15,6 +15,7 @@ import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Pattern;
 
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -150,6 +151,51 @@ public class WriteToolController {
             String reason) {}
 
     public record CancelPo(@NotBlank String poId, int expectedVersion, String reason) {}
+
+    public record VerifyPo(
+            @NotBlank String poId,
+            @NotBlank String sku,
+            @NotBlank String nodeId,
+            @NotBlank String supplierId,
+            @Min(1) int qty,
+            @NotNull BigDecimal unitPrice,
+            LocalDate expectedDelivery) {}
+
+    /**
+     * Check an order again after a repair changed it. A repair that is not
+     * re-verified is the agent reading its own optimism a second time.
+     */
+    @PostMapping("/verify-po")
+    public ToolResponse<VerificationReport> verifyPo(@Valid @RequestBody VerifyPo req,
+                                                     @RequestHeader("X-Run-Id") String runId) {
+        return ToolResponse.ok(verifier.verify(req.poId(), new Proposal(req.sku(), req.nodeId(),
+                req.supplierId(), req.qty(), req.unitPrice(), req.expectedDelivery(), null)));
+    }
+
+    public record SupplierEventReq(
+            @NotBlank String poId,
+            @NotBlank String sender,
+            @NotBlank @Pattern(regexp = "CONFIRM|PARTIAL|DELAY|PRICE_CHANGE|OTHER",
+                    message = "must be CONFIRM, PARTIAL, DELAY, PRICE_CHANGE or OTHER") String kind,
+            @Min(0) Integer confirmedQty,
+            LocalDate confirmedDelivery,
+            @DecimalMin(value = "0.01", message = "unit price must be positive") BigDecimal unitPrice,
+            String rawText) {}
+
+    /**
+     * A supplier message the agent has read. The platform checks it before anything
+     * changes - the model's reading of an email is a claim, not a fact.
+     */
+    @PostMapping("/supplier-event")
+    public ToolResponse<Map<String, Object>> supplierEvent(@Valid @RequestBody SupplierEventReq req,
+                                                           @RequestHeader("X-Run-Id") String runId) {
+        Map<String, Object> out = orders.applySupplierEvent(req.poId(), req.sender(), req.kind(),
+                req.confirmedQty(), req.confirmedDelivery(), req.unitPrice(), req.rawText(), runId);
+        if (out.containsKey("error")) {
+            return ToolResponse.error((String) out.get("error"), (String) out.get("detail"));
+        }
+        return ToolResponse.ok(out);
+    }
 
     @PostMapping("/create-po")
     public ToolResponse<Map<String, Object>> create(@Valid @RequestBody CreatePo req,

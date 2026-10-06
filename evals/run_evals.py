@@ -56,7 +56,9 @@ def check(case, run):
         out.append(("quantity band", lo <= qty <= hi, "%s in [%s, %s]" % (qty, lo, hi)))
 
     if "required_tools" in e:
-        missing = [t for t in e["required_tools"] if t not in tools]
+        # /tools/po counts /tools/po/PO-0031 - the id is part of the path
+        missing = [t for t in e["required_tools"]
+                   if not any(x == t or x.startswith(t + "/") for x in tools)]
         out.append(("tool coverage", not missing,
                     "all present" if not missing else "never called: " + ", ".join(missing)))
 
@@ -95,6 +97,13 @@ def check(case, run):
                         "describes %d and %d as additive, but %d already includes %d"
                         % (pos, it, pos, it)))
 
+
+    if "reading" in e:
+        # what the model pulled out of the email, before the platform checked it
+        got = run.get("reading") or {}
+        wrong = {k: got.get(k) for k, v in e["reading"].items() if got.get(k) != v}
+        out.append(("read the email right", not wrong,
+                    "as expected" if not wrong else "got %s" % wrong))
 
     if "must_cite" in e:
         if "citations" not in run:
@@ -135,6 +144,15 @@ def check(case, run):
 def run_live(case):
     http = httpx.Client(timeout=180)
     body = dict(case["input"])
+
+    if "email" in body:
+        # the agent opens its own run for an incoming email
+        res = http.post(AGENT + "/supplier-messages", json=body["email"])
+        res.raise_for_status()
+        out = res.json()
+        out["_recordedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        out["_model"] = os.getenv("GEMINI_MODEL", "unknown")
+        return out
 
     r = http.post(PLATFORM + "/runs", json={
         "scenario": body["scenario"], "sku": body.get("sku"),
