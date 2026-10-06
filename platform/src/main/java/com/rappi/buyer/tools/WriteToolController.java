@@ -42,16 +42,18 @@ import java.util.Map;
 public class WriteToolController {
 
     private final PurchaseOrderService orders;
+    private final TransferService transfers;
     private final Verifier verifier;
     private final ApprovalRepo approvals;
     private final AgentRunRepo runs;
     private final ObjectMapper json;
     private final Clock clock;
 
-    public WriteToolController(PurchaseOrderService orders, Verifier verifier,
+    public WriteToolController(PurchaseOrderService orders, TransferService transfers, Verifier verifier,
                                ApprovalRepo approvals, AgentRunRepo runs,
                                ObjectMapper json, Clock clock) {
         this.orders = orders;
+        this.transfers = transfers;
         this.verifier = verifier;
         this.approvals = approvals;
         this.runs = runs;
@@ -151,6 +153,38 @@ public class WriteToolController {
             String reason) {}
 
     public record CancelPo(@NotBlank String poId, int expectedVersion, String reason) {}
+
+    public record CreateTransfer(
+            @NotBlank String sku,
+            @NotBlank String fromNode,
+            @NotBlank String toNode,
+            @Min(value = 1, message = "quantity must be at least 1") int qty,
+            @NotBlank String idempotencyKey,
+            String approvalId) {}
+
+    /**
+     * Move stock from one store to another. Always needs an approved approval of
+     * exactly this transfer, and is verified in the same response like a PO.
+     */
+    @PostMapping("/create-transfer")
+    public ToolResponse<Map<String, Object>> createTransfer(@Valid @RequestBody CreateTransfer req,
+                                                            @RequestHeader("X-Run-Id") String runId) {
+        TransferService.Result res = transfers.create(req.sku(), req.fromNode(), req.toNode(),
+                req.qty(), req.idempotencyKey(), req.approvalId(), runId);
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("executed", res.executed());
+        out.put("idempotent", res.idempotent());
+        out.put("transferId", res.transferId());
+        out.put("message", res.message());
+        if (res.executed() && !res.idempotent()) {
+            VerificationReport v = verifier.verifyTransfer(res.transferId(), req.sku(),
+                    req.fromNode(), req.toNode(), req.qty());
+            out.put("verification", v);
+            out.put("verified", v.verified());
+        }
+        return ToolResponse.ok(out);
+    }
 
     public record VerifyPo(
             @NotBlank String poId,

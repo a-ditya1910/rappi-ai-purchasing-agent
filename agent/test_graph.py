@@ -143,6 +143,20 @@ class FakePlatform:
     def po(self, poId):                           return self._ok("/tools/po", {"poId": poId, "version": 1})
     def demand_anomaly(self, sku, nodeId, l=60):  return self._ok("/tools/demand-anomaly", {"verdict": "REAL"})
 
+    def transfer_options(self, sku, nodeId):
+        return self._ok("/tools/transfer-options", {
+            "need": 189, "steps": ["NODE-BOG-01 needs 189"],
+            "options": [
+                {"fromNode": "NODE-BOG-02", "qty": 188, "spare": 1305, "keep": 95, "usable": True,
+                 "steps": ["NODE-BOG-02 has 1400, must keep 95"]},
+                {"fromNode": "NODE-MEX-01", "qty": 0, "usable": False, "note": "no forecast"}]})
+
+    def create_transfer(self, sku, fromNode, toNode, qty, idempotencyKey, approvalId=None):
+        self.calls.append("/tools/create-transfer")
+        self.transfers = getattr(self, "transfers", []) + [{"qty": qty, "approvalId": approvalId}]
+        return {"ok": True, "data": {"executed": True, "idempotent": False, "transferId": "TO-0001",
+                                     "verification": {"outcome": "VERIFIED", "diffs": [], "notes": []}}}
+
     def supplier_options(self, sku, nodeId):
         def opt(sid, qty, price, lead, score):
             return {"supplierId": sid, "usable": True, "score": score, "note": None,
@@ -716,3 +730,87 @@ def test_a_citation_that_was_never_retrieved_is_dropped():
 
     assert out["proposal"]["citations"] == ["POL-PERISH-02"]
     assert any("POL-DOES-NOT-EXIST" in e for e in out["errors"])
+
+
+
+# ---- scenario 4: no legal purchase, so a transfer between stores -----------
+
+def no_legal_order():
+    """Rice: a real need, but budget and the supplier minimum make every purchase illegal."""
+    return {"recommendedQty": 0, "rawNeed": 713, "inventoryPosition": 80,
+            "leadTimeDays": 14, "unitPrice": 2.10,
+            "explanationSteps": ["No legal order: 140 is affordable but the minimum is 1000"],
+            "warnings": []}
+
+
+def transfers_it(from_node="NODE-BOG-02", qty=None):
+    args = {"decision": "ESCALATE", "confidence": 0.8, "key_factors": [],
+            "reasoning": "no legal purchase, POL-TRANSFER-01 allows a transfer",
+            "action_type": "transfer", "from_node": from_node}
+    if qty is not None:
+        args["qty"] = qty
+    return tool_call("record_decision", args)
+
+
+def test_transfer_options_are_put_in_front_of_the_model_when_nothing_is_legal():
+    llm = FakeLLM([gathered_everything()], transfers_it())
+    platform = FakePlatform(plan=no_legal_order())
+    run(llm, platform)
+
+    assert "/tools/transfer-options" in platform.calls
+    assert "TRANSFER OPTIONS" in llm.prompts_seen[-1]
+    assert "from NODE-BOG-02: send 188" in llm.prompts_seen[-1]
+
+
+def test_no_transfer_options_when_a_purchase_is_legal():
+    platform = FakePlatform()                         # milk: legal order of 204
+    run(FakeLLM([gathered_everything()], decision()), platform)
+    assert "/tools/transfer-options" not in platform.calls
+
+
+def test_a_transfer_always_goes_to_a_buyer_and_moves_nothing():
+    platform = FakePlatform(plan=no_legal_order())
+    out = run(FakeLLM([gathered_everything()], transfers_it()), platform)
+
+    action = platform.approvals[0]["action"]
+    assert action == {"type": "transfer", "sku": "SKU-MILK-1L", "fromNode": "NODE-BOG-02",
+                      "toNode": "NODE-BOG-01", "qty": 188, "decision": "ESCALATE",
+                      "reason": "no legal purchase, POL-TRANSFER-01 allows a transfer"}
+    assert "POL-TRANSFER-01" in platform.approvals[0]["reason"]
+    assert "/tools/create-transfer" not in platform.calls
+    assert "/tools/validate-purchase" not in platform.calls
+    assert out["execution"]["outcome"] == "NEEDS_APPROVAL"
+
+
+def test_the_model_can_send_less_but_never_more_than_the_planner():
+    platform = FakePlatform(plan=no_legal_order())
+    run(FakeLLM([gathered_everything()], transfers_it(qty=5000)), platform)
+    assert platform.approvals[0]["action"]["qty"] == 188
+
+
+def test_a_sender_that_was_not_offered_is_ignored():
+    platform = FakePlatform(plan=no_legal_order())
+    out = run(FakeLLM([gathered_everything()], transfers_it(from_node="NODE-MEX-01")), platform)
+    assert not any(a["action"].get("type") == "transfer" for a in platform.approvals)
+    assert any("NODE-MEX-01" in e for e in out["errors"])
+
+
+def test_an_approved_transfer_executes_once_and_is_verified():
+    import execute
+    platform = FakePlatform()
+    action = {"type": "transfer", "sku": "SKU-RICE-5KG", "fromNode": "NODE-BOG-02",
+              "toNode": "NODE-BOG-01", "qty": 188}
+    out = execute.execute_transfer(platform, "r4", action, "AP-9")
+
+    assert platform.transfers == [{"qty": 188, "approvalId": "AP-9"}]
+    assert out["outcome"] == "VERIFIED" and out["transferId"] == "TO-0001"
+
+
+def test_a_transfer_is_recorded_as_escalate_whatever_the_model_called_it():
+    platform = FakePlatform(plan=no_legal_order())
+    accept = tool_call("record_decision", {
+        "decision": "ACCEPT", "confidence": 0.8, "key_factors": [], "reasoning": "transfer it",
+        "action_type": "transfer", "from_node": "NODE-BOG-02"})
+    run(FakeLLM([gathered_everything()], accept), platform)
+    assert platform.decisions[0]["decision"] == "ESCALATE"
+    assert platform.approvals[0]["action"]["decision"] == "ESCALATE"

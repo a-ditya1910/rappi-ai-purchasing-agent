@@ -16,6 +16,7 @@ import com.rappi.buyer.repo.ProductRepo;
 import com.rappi.buyer.repo.PurchaseOrderRepo;
 import com.rappi.buyer.repo.SupplierProductRepo;
 import com.rappi.buyer.repo.SupplierRepo;
+import com.rappi.buyer.repo.TransferOrderRepo;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -67,6 +68,7 @@ class ReorderPlannerTest {
     @Mock ForecastRepo forecasts;
     @Mock PurchaseOrderRepo purchaseOrders;
     @Mock BudgetRepo budgets;
+    @Mock TransferOrderRepo transfers;
 
     ReorderPlanner planner;
 
@@ -74,7 +76,7 @@ class ReorderPlannerTest {
     void setUp() {
         Clock clock = Clock.fixed(TODAY.atStartOfDay(ZoneOffset.UTC).toInstant(), ZoneOffset.UTC);
         planner = new ReorderPlanner(products, nodes, suppliers, supplierProducts, inventory,
-                forecasts, purchaseOrders, budgets, planningProps(), clock);
+                forecasts, purchaseOrders, budgets, transfers, planningProps(), clock);
 
         product(12, 1100, 12, true, "A");
         node(7, 40_000_000L, 34_000_000L);

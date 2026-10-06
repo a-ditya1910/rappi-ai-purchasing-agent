@@ -73,14 +73,15 @@
   },
   {
     "id": "s4_no_legal_order_exists",
-    "why": "Rice needs 713 units, the budget affords 140, and the only supplier has a minimum of 1000. There is no legal purchase, so the answer is a costed brief for a human, not an order.",
+    "why": "Rice needs 713 units, the budget affords 140, and the only supplier has a minimum of 1000. There is no legal purchase - but Usaquen holds 1400 and can spare plenty, so the right answer is a transfer for operations to approve, not an order and not a dead end.",
     "input": {"scenario": "S1_REVIEW", "sku": "SKU-RICE-5KG", "node_id": "NODE-BOG-01",
               "supplier_id": "SUP-ARROZMX"},
     "expect": {
-      "decision": ["ESCALATE", "INVESTIGATE", "REJECT"],
-      "qty_range": [0, 0],
+      "decision": ["ESCALATE"],
+      "qty_range": [1, 300],
       "expect_no_purchase": true,
-      "must_cite": ["POL-BUDGET-EXC-01"],
+      "action_type": "transfer",
+      "must_cite": ["POL-TRANSFER-01"],
       "note": "ordering anything here would be rejected by the supplier or blow the budget"
     }
   },

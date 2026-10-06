@@ -105,6 +105,12 @@ def check(case, run):
         out.append(("read the email right", not wrong,
                     "as expected" if not wrong else "got %s" % wrong))
 
+    if "action_type" in e:
+        act = (run.get("execution") or {}).get("action") or {}
+        got = act.get("type") or "purchase"
+        out.append(("chose the right kind of action", got == e["action_type"],
+                    "%s (expected %s)" % (got, e["action_type"])))
+
     if "must_cite" in e:
         if "citations" not in run:
             # recorded before the agent had a knowledge base. say so rather than

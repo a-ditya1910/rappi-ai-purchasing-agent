@@ -129,7 +129,8 @@ public class PurchaseOrderService {
         }
         if (report.requiresApproval() || "T3".equals(report.riskTier())) {
             String why = approvalId == null ? "tier " + report.riskTier() + ", needs a buyer to approve it"
-                    : approvalProblem(approvalId, runId, sku, nodeId, supplierId, qty, unitPrice);
+                    : approvalProblem(approvalId, runId, Map.of("sku", sku, "nodeId", nodeId,
+                            "supplierId", supplierId, "qty", qty, "unitPrice", unitPrice));
             if (why != null) {
                 return new WriteResult(false, false, null, report, why);
             }
@@ -152,7 +153,7 @@ public class PurchaseOrderService {
         BigDecimal total = price.multiply(BigDecimal.valueOf(Math.max(conf.confirmedQty(), 0)));
 
         PurchaseOrder po = new PurchaseOrder();
-        po.setId(nextPoId());
+        po.setId(nextId("PO"));
         po.setNodeId(nodeId);
         po.setSupplierId(supplierId);
         po.setStatus(conf.status());
@@ -439,8 +440,11 @@ public class PurchaseOrderService {
         return l.getQtyConfirmed() != null ? l.getQtyConfirmed() : l.getQtyOrdered();
     }
 
-    private String approvalProblem(String id, String runId, String sku, String nodeId,
-                                   String supplierId, int qty, BigDecimal price) {
+    /**
+     * Is approvalId a buyer's approval of exactly this action? null if it is, the
+     * reason if it is not. Shared by purchase orders and transfers.
+     */
+    public String approvalProblem(String id, String runId, Map<String, Object> expected) {
         Approval a = approvals.findById(id).orElse(null);
         if (a == null) return "unknown approval " + id;
         if (a.getStatus() != Approval.Status.APPROVED) return "approval " + id + " is " + a.getStatus();
@@ -452,13 +456,26 @@ public class PurchaseOrderService {
         } catch (Exception e) {
             return "approval " + id + " has an unreadable action";
         }
-        // the buyer approved one specific order. anything else needs its own approval
-        boolean same = sku.equals(act.get("sku")) && nodeId.equals(act.get("nodeId"))
-                && supplierId.equals(act.get("supplierId"))
-                && act.get("qty") instanceof Number q && q.intValue() == qty
-                && act.get("unitPrice") != null
-                && new BigDecimal(act.get("unitPrice").toString()).compareTo(price) == 0;
-        return same ? null : "approval " + id + " was for a different order";
+        // the buyer approved one specific action. anything else needs its own approval
+        for (Map.Entry<String, Object> e : expected.entrySet()) {
+            if (!same(act.get(e.getKey()), e.getValue())) {
+                return "approval " + id + " was for a different "
+                        + ("transfer".equals(expected.get("type")) ? "transfer" : "order");
+            }
+        }
+        return null;
+    }
+
+    private static boolean same(Object a, Object b) {
+        if (a == null || b == null) return a == b;
+        if (a instanceof Number || b instanceof Number) {
+            try {
+                return new BigDecimal(a.toString()).compareTo(new BigDecimal(b.toString())) == 0;
+            } catch (NumberFormatException e) {
+                return false;
+            }
+        }
+        return a.toString().equals(b.toString());
     }
 
     /**
@@ -476,13 +493,14 @@ public class PurchaseOrderService {
         return po;
     }
 
-    private String nextPoId() {
+    /** PO-0001, TO-0001 ... from the id_counters row of that name. */
+    public String nextId(String counter) {
         // LAST_INSERT_ID(expr) remembers the value for this connection only, and the
         // UPDATE row-locks the counter, so two concurrent creates can't get the same id
         em.createNativeQuery(
-                "UPDATE id_counters SET next_val = LAST_INSERT_ID(next_val + 1) WHERE name = 'PO'")
-                .executeUpdate();
+                "UPDATE id_counters SET next_val = LAST_INSERT_ID(next_val + 1) WHERE name = ?1")
+                .setParameter(1, counter).executeUpdate();
         long n = ((Number) em.createNativeQuery("SELECT LAST_INSERT_ID()").getSingleResult()).longValue();
-        return "PO-%04d".formatted(n);
+        return "%s-%04d".formatted(counter, n);
     }
 }

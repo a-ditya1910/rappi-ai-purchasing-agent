@@ -76,6 +76,43 @@ def execute_and_verify(platform, llm, run_id, action, plan, recommended_qty=None
     return _repair(platform, llm, result, verification, plan, action)
 
 
+def execute_transfer(platform, run_id, action, approval_id):
+    """Move stock between stores, after a buyer approved exactly this transfer.
+
+    No repair loop here. A transfer that does not verify goes straight back to a
+    buyer - the options are a different sender or a purchase, and both are
+    decisions operations owns.
+    """
+    result = {"action": action, "repairs": []}
+    key = idempotency_key(run_id, "transfer", action["sku"], int(action["qty"]))
+    res = platform.create_transfer(action["sku"], action["fromNode"], action["toNode"],
+                                   int(action["qty"]), key, approval_id)
+    if not res.get("ok"):
+        result.update(outcome="WRITE_FAILED", error=res.get("error"), detail=res.get("detail"))
+        return result
+
+    data = res["data"]
+    result["transferId"] = data.get("transferId")
+    if not data.get("executed"):
+        # refused by the platform - over the spare stock, no room, approval mismatch
+        result.update(outcome="REFUSED", detail=data.get("message"))
+        return result
+
+    verification = data.get("verification") or {}
+    result["verification"] = verification
+    if data.get("idempotent") or verification.get("outcome") == "VERIFIED":
+        result["outcome"] = "VERIFIED"
+        return result
+
+    platform.request_approval(
+        reason="transfer %s was made but did not verify: %s" % (
+            data.get("transferId"), "; ".join(verification.get("notes", [])) or "see the trace"),
+        riskTier="T3", proposedAction={"transferId": data.get("transferId"),
+                                       "verification": verification})
+    result["outcome"] = "ESCALATED"
+    return result
+
+
 def _repair(platform, llm, result, verification, plan, action):
     mismatches = [d for d in verification.get("diffs", []) if not d.get("ok")]
     attempts = 0

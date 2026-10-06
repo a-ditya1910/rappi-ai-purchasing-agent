@@ -141,6 +141,14 @@ class Platform:
         body.update(stats)     # llmCalls, tokensIn, tokensOut, durationMs
         return self.post("/tools/record-decision", body)
 
+    def transfer_options(self, sku, nodeId):
+        return self.get("/tools/transfer-options", sku=sku, nodeId=nodeId)
+
+    def create_transfer(self, sku, fromNode, toNode, qty, idempotencyKey, approvalId=None):
+        return self.post("/tools/create-transfer", {
+            "sku": sku, "fromNode": fromNode, "toNode": toNode, "qty": qty,
+            "idempotencyKey": idempotencyKey, "approvalId": approvalId})
+
     def supplier_options(self, sku, nodeId):
         return self.get("/tools/supplier-options", sku=sku, nodeId=nodeId)
 

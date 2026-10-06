@@ -104,6 +104,24 @@ def resume(run_id: str, req: ResumeRequest):
     if not action.get("sku"):
         return {"runId": run_id, "error": "the approved action has no sku to act on"}
 
+    if action.get("type") == "transfer":
+        platform.log_step("DECISION", "approval",
+                          {"approvalId": req.approval_id, "approvedAction": action})
+        result = execute_mod.execute_transfer(platform, run_id, action, req.approval_id)
+        platform.record_decision(
+            decision=action.get("decision") or "ESCALATE", finalQty=action.get("qty"),
+            explanation="Transfer approved by %s. Outcome: %s %s" % (
+                req.approval_id, result.get("outcome"), result.get("detail") or ""),
+            durationMs=int((time.time() - started) * 1000))
+        remember_run(run_id, action["sku"], action["toNode"], action["fromNode"], None,
+                     "transfer", action.get("qty"),
+                     "approved by a buyer, then " + str(result.get("outcome")),
+                     action.get("reason"), reviewed=True)
+        return {"runId": run_id, "approvalId": req.approval_id, "outcome": result.get("outcome"),
+                "transferId": result.get("transferId"), "verification": result.get("verification"),
+                "detail": result.get("detail"), "llmCalls": 0,
+                "durationMs": int((time.time() - started) * 1000)}
+
     plan = (platform.calculate_reorder(
         action["sku"], action["nodeId"], action["supplierId"]) or {}).get("data") or {}
 

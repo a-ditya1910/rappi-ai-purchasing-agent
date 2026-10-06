@@ -15,6 +15,7 @@ import com.rappi.buyer.planner.DemandAnomalyDetector;
 import com.rappi.buyer.planner.ReorderPlan;
 import com.rappi.buyer.planner.ReorderPlanner;
 import com.rappi.buyer.planner.SupplierRanker;
+import com.rappi.buyer.planner.TransferPlanner;
 import com.rappi.buyer.repo.BudgetRepo;
 import com.rappi.buyer.repo.ForecastRepo;
 import com.rappi.buyer.repo.InventoryRepo;
@@ -71,6 +72,7 @@ public class ToolController {
     private final ConstraintEngine constraints;
     private final DemandAnomalyDetector anomalies;
     private final SupplierRanker ranker;
+    private final TransferPlanner transferPlanner;
     private final Clock clock;
 
     public ToolController(ProductRepo products, NodeRepo nodes, SupplierRepo suppliers,
@@ -78,7 +80,7 @@ public class ToolController {
                           ForecastRepo forecasts, SalesRepo sales, BudgetRepo budgets,
                           PurchaseOrderRepo purchaseOrders, ReorderPlanner planner,
                           ConstraintEngine constraints, DemandAnomalyDetector anomalies,
-                          SupplierRanker ranker, Clock clock) {
+                          SupplierRanker ranker, TransferPlanner transferPlanner, Clock clock) {
         this.products = products;
         this.nodes = nodes;
         this.suppliers = suppliers;
@@ -92,6 +94,7 @@ public class ToolController {
         this.constraints = constraints;
         this.anomalies = anomalies;
         this.ranker = ranker;
+        this.transferPlanner = transferPlanner;
         this.clock = clock;
     }
 
@@ -235,6 +238,13 @@ public class ToolController {
     public ToolResponse<List<SupplierRanker.Option>> supplierOptions(@RequestParam String sku,
                                                                      @RequestParam String nodeId) {
         return ToolResponse.ok(ranker.rank(sku, nodeId));
+    }
+
+    /** What this store needs, and what every other store could send without going short itself. */
+    @GetMapping("/transfer-options")
+    public ToolResponse<TransferPlanner.TransferPlan> transferOptions(@RequestParam String sku,
+                                                                      @RequestParam String nodeId) {
+        return ToolResponse.ok(transferPlanner.plan(sku, nodeId));
     }
 
     @GetMapping("/demand-anomaly")

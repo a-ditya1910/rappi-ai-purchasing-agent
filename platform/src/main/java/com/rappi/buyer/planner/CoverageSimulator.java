@@ -2,9 +2,11 @@ package com.rappi.buyer.planner;
 
 import com.rappi.buyer.domain.DemandForecast;
 import com.rappi.buyer.domain.PurchaseOrder;
+import com.rappi.buyer.domain.TransferOrder;
 import com.rappi.buyer.repo.ForecastRepo;
 import com.rappi.buyer.repo.InventoryRepo;
 import com.rappi.buyer.repo.PurchaseOrderRepo;
+import com.rappi.buyer.repo.TransferOrderRepo;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -35,13 +37,16 @@ public class CoverageSimulator {
     private final InventoryRepo inventory;
     private final ForecastRepo forecasts;
     private final PurchaseOrderRepo purchaseOrders;
+    private final TransferOrderRepo transfers;
     private final Clock clock;
 
     public CoverageSimulator(InventoryRepo inventory, ForecastRepo forecasts,
-                             PurchaseOrderRepo purchaseOrders, Clock clock) {
+                             PurchaseOrderRepo purchaseOrders, TransferOrderRepo transfers,
+                             Clock clock) {
         this.inventory = inventory;
         this.forecasts = forecasts;
         this.purchaseOrders = purchaseOrders;
+        this.transfers = transfers;
         this.clock = clock;
     }
 
@@ -71,6 +76,12 @@ public class CoverageSimulator {
                     .mapToInt(l -> l.getQtyConfirmed() != null ? l.getQtyConfirmed() : l.getQtyOrdered())
                     .sum();
             arrivals.merge(po.getExpectedDelivery(), units, Integer::sum);
+        }
+        // stock sent over from another store lands on the shelf the same way
+        for (TransferOrder t : transfers.findIncoming(nodeId, sku)) {
+            if (!t.getExpectedArrival().isAfter(end)) {
+                arrivals.merge(t.getExpectedArrival(), t.getQty(), Integer::sum);
+            }
         }
 
         int stockoutDays = 0;

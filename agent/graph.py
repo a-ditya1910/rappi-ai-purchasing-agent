@@ -58,6 +58,7 @@ class State(TypedDict, total=False):
     retrieved: list
     searches: list
     options: list
+    transfers: dict
     analysis: dict
     proposal: dict
     validation: dict
@@ -163,6 +164,14 @@ def build(platform, llm, kb=None):
             state["analysis"]["deltaVsRecommendationPct"] = round(delta, 1)
 
         _lookup_policies(state, plan)
+
+        # no legal purchase but a real need: put the transfer options in front of
+        # the model by code, the same way the policies are. a model that never
+        # thought to ask would otherwise stop at "no legal order exists"
+        if (plan.get("rawNeed") or 0) > 0 and not plan.get("recommendedQty"):
+            res = platform.transfer_options(sit["sku"], sit["node_id"])
+            if res.get("ok"):
+                state["transfers"] = res["data"]
         return state
 
     def _lookup_policies(state, plan):
@@ -208,7 +217,8 @@ def build(platform, llm, kb=None):
                     retrieved="\n\n".join(state.get("retrieved") or [])
                               or "(nothing was retrieved)",
                     analysis="\n".join(plan.get("explanationSteps", [])),
-                    options=_options_block(state.get("options")),
+                    options=_options_block(state.get("options"))
+                            + _transfers_block(state.get("transfers")),
                     recommendation_line=rec_line))]
 
         res = llm.invoke(msgs, tools=[_decision_tool()], label="propose")
@@ -222,6 +232,13 @@ def build(platform, llm, kb=None):
         p = state.get("proposal") or {}
         plan = state.get("analysis") or {}
         qty = p.get("qty") or 0
+
+        if p.get("action_type") == "transfer":
+            # not a purchase, so the purchase rules do not apply. create-transfer
+            # checks spare stock and storage itself, after operations approves
+            state["validation"] = {"verdict": "NOT_APPLICABLE", "riskTier": "T3",
+                                   "detail": "transfer - checked by create-transfer after approval"}
+            return state
 
         if p.get("decision") in ("INVESTIGATE", "REJECT") or qty <= 0:
             state["validation"] = {"verdict": "NOT_APPLICABLE",
@@ -248,6 +265,11 @@ def build(platform, llm, kb=None):
         v = state.get("validation") or {}
         sit = state["situation"]
         qty = p.get("qty") or 0
+
+        if p.get("action_type") == "transfer":
+            if _queue_transfer(platform, llm, state, p, sit):
+                return state
+            # an unusable transfer choice falls through to the normal path
 
         # the model may decide to order nothing, but not silently when the maths says
         # the store will run short. a wrong "do nothing" empties a shelf just as
@@ -369,6 +391,12 @@ def _read_tools(platform, kb):
         return out
 
     @tool
+    def get_transfer_options(sku: str, node_id: str) -> dict:
+        """Whether another dark store can send this one stock: what this store
+        needs, and what each other store could spare above its own safety stock."""
+        return platform.transfer_options(sku, node_id)
+
+    @tool
     def get_demand_anomaly(sku: str, node_id: str) -> dict:
         """Whether a demand change is real or explained (promotion, one-off order):
         tracking signal, how many days it has lasted, and a verdict."""
@@ -420,7 +448,7 @@ def _read_tools(platform, kb):
         return platform.po(po_id)
 
     return [search_knowledge, get_product, get_inventory_position, get_demand_forecast,
-            get_sales_actuals, get_demand_anomaly, list_open_pos, get_suppliers,
+            get_sales_actuals, get_demand_anomaly, get_transfer_options, list_open_pos, get_suppliers,
             get_budget, get_storage, get_purchase_order]
 
 
@@ -429,7 +457,8 @@ def _decision_tool():
     def record_decision(decision: str, reasoning: str, key_factors: list,
                         confidence: float, qty: int = None,
                         assumptions: list = None, citations: list = None,
-                        supplier_id: str = None) -> dict:
+                        supplier_id: str = None, action_type: str = "purchase",
+                        from_node: str = None) -> dict:
         """Record the purchasing decision.
 
         decision must be one of ACCEPT, MODIFY, REJECT, INVESTIGATE, ESCALATE.
@@ -438,6 +467,8 @@ def _decision_tool():
         assumptions are anything you took on faith rather than verified.
         citations are the refs of the reference documents the decision relies on.
         supplier_id: only when supplier options were given - which one to order from.
+        action_type: "purchase" (default) or "transfer" when transfer options were given.
+        from_node: for a transfer, which store sends the stock.
         """
         return {"ok": True}
 
@@ -563,6 +594,50 @@ def _apply_supplier_choice(state):
         p["qty"] = new.get("recommendedQty")
     state["analysis"] = new
     sit["supplier_id"] = chosen
+
+
+def _queue_transfer(platform, llm, state, p, sit):
+    """A transfer always goes to a buyer - POL-TRANSFER-01. The quantity is the
+    planner's for that sender at most; the model may send less, never more. A
+    sender that was not offered is ignored. Returns False if nothing was queued."""
+    t = state.get("transfers") or {}
+    opts = {o["fromNode"]: o for o in t.get("options", []) if o.get("usable")}
+    sender = opts.get(p.get("from_node"))
+    if not sender:
+        state["errors"].append(f"transfer from {p.get('from_node')} is not a usable option - ignored")
+        return False
+
+    qty = min(p.get("qty") or sender["qty"], sender["qty"])
+    # the agent has the information and operations has the authority - that is
+    # ESCALATE in this project's terms, whatever word the model used
+    p["decision"] = "ESCALATE"
+    action = {"type": "transfer", "sku": sit["sku"], "fromNode": sender["fromNode"],
+              "toNode": sit["node_id"], "qty": qty, "decision": p.get("decision") or "ESCALATE",
+              "reason": p.get("reasoning")}
+    platform.request_approval(
+        reason="transfer %d %s from %s to %s needs operations approval (POL-TRANSFER-01). %s"
+               % (qty, sit["sku"], sender["fromNode"], sit["node_id"], " ".join(sender.get("steps", []))),
+        riskTier="T3", proposedAction=action)
+    platform.record_decision(decision=p.get("decision") or "ESCALATE", finalQty=qty,
+                             explanation=_explain(p), validationReport=state.get("validation"),
+                             **_stats(llm, state))
+    p["qty"] = qty
+    state["execution"] = {"outcome": "NEEDS_APPROVAL", "action": action}
+    return True
+
+
+def _transfers_block(t):
+    if not t:
+        return ""
+    lines = ["", "TRANSFER OPTIONS (no legal purchase exists; set action_type to transfer and "
+                 "from_node to use one - every transfer needs operations approval)",
+             "  " + " | ".join(t.get("steps", []))]
+    for o in t.get("options", []):
+        if o.get("usable"):
+            lines.append(f"  from {o['fromNode']}: send {o['qty']} - " + " ".join(o.get("steps", [])))
+        else:
+            lines.append(f"  from {o['fromNode']}: not usable - {o.get('note')}")
+    return "\n".join(lines)
 
 
 def _options_block(options):
