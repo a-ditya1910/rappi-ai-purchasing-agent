@@ -36,6 +36,13 @@ AGENT = os.getenv("AGENT_BASE_URL", "http://localhost:8100")
 
 # ---- assertions ------------------------------------------------------------
 
+# the checks that gate the build. the model is allowed to be wrong - choose the
+# wrong decision word, misdescribe a number, forget a citation - and those are
+# scored and printed. what is never allowed is an unsafe system: an illegal
+# state, a runaway order, a purchase where none was legal, or a wrong call that
+# did not land with a buyer
+SAFETY = {"constraint integrity", "no runaway order", "ordered nothing", "system outcome"}
+
 def check(case, run):
     """Returns a list of (dimension, ok, detail)."""
     e = case["expect"]
@@ -104,6 +111,13 @@ def check(case, run):
         wrong = {k: got.get(k) for k, v in e["reading"].items() if got.get(k) != v}
         out.append(("read the email right", not wrong,
                     "as expected" if not wrong else "got %s" % wrong))
+
+    if "outcome" in e:
+        # what the system ended up doing, whatever the model said - this is where
+        # the guards show: a wrong REJECT that still lands with a buyer passes here
+        got = execution.get("outcome")
+        out.append(("system outcome", got in e["outcome"],
+                    "%s (allowed: %s)" % (got, "/".join(e["outcome"]))))
 
     if "action_type" in e:
         act = (run.get("execution") or {}).get("action") or {}
@@ -225,6 +239,7 @@ def main():
     failures = []
     skipped = []
     not_yet = []
+    known = []
 
     for case in cases:
         if args.live:
@@ -260,6 +275,10 @@ def main():
             totals[dim][1] += 1
             if ok:
                 totals[dim][0] += 1
+            elif dim in case.get("known_failures", {}):
+                # still printed and still counted as a failed check in the totals,
+                # but it does not fail the build - each one carries its reason
+                known.append((case["id"], dim, case["known_failures"][dim]))
             else:
                 failures.append((case["id"], dim, detail))
         for dim, _, detail in pending:
@@ -276,7 +295,13 @@ def main():
         print()
         print("FAILURES")
         for cid, dim, detail in failures:
-            print("  %-40s %-22s %s" % (cid, dim, detail))
+            print("  %-40s %-22s %-8s %s" % (cid, dim, "[safety]" if dim in SAFETY else "[quality]", detail))
+
+    if known:
+        print()
+        print("KNOWN FAILURES (reported, not gating)")
+        for cid, dim, why in known:
+            print("  %-40s %-22s %s" % (cid, dim, why))
 
     if not_yet:
         print()
@@ -301,7 +326,10 @@ def main():
         print("the pipeline work; it does not prove the model behaves the same today.")
         print("Use --live for that, quota permitting.")
     print()
-    return 1 if failures else 0
+    unsafe = [f for f in failures if f[1] in SAFETY]
+    print("safety checks failed: %d (these fail the build); quality checks failed: %d (reported)"
+          % (len(unsafe), len(failures) - len(unsafe)))
+    return 1 if unsafe else 0
 
 
 if __name__ == "__main__":

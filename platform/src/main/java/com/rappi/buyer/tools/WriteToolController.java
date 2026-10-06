@@ -1,6 +1,7 @@
 package com.rappi.buyer.tools;
 
 import com.rappi.buyer.api.ApprovalController;
+import com.rappi.buyer.api.RunLock;
 import com.rappi.buyer.constraints.Proposal;
 import com.rappi.buyer.domain.AgentRun;
 import com.rappi.buyer.domain.Approval;
@@ -17,6 +18,7 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
@@ -46,17 +48,19 @@ public class WriteToolController {
     private final Verifier verifier;
     private final ApprovalRepo approvals;
     private final AgentRunRepo runs;
+    private final RunLock lock;
     private final ObjectMapper json;
     private final Clock clock;
 
     public WriteToolController(PurchaseOrderService orders, TransferService transfers, Verifier verifier,
-                               ApprovalRepo approvals, AgentRunRepo runs,
-                               ObjectMapper json, Clock clock) {
+                               ApprovalRepo approvals, AgentRunRepo runs, RunLock lock,
+                               ObjectMapper json, @Qualifier("wallClock") Clock clock) {
         this.orders = orders;
         this.transfers = transfers;
         this.verifier = verifier;
         this.approvals = approvals;
         this.runs = runs;
+        this.lock = lock;
         this.json = json;
         this.clock = clock;
     }
@@ -100,6 +104,8 @@ public class WriteToolController {
         runs.findById(runId).ifPresent(r -> {
             r.setStatus(AgentRun.Status.NEEDS_APPROVAL);
             runs.save(r);
+            // parked on a human - it should not hold the sku while it waits
+            lock.release(r.getSku(), r.getNodeId(), runId);
         });
 
         return ToolResponse.ok(Map.of(
@@ -130,6 +136,7 @@ public class WriteToolController {
             run.setStatus(AgentRun.Status.COMPLETED);
         }
         runs.save(run);
+        lock.release(run.getSku(), run.getNodeId(), runId);
         return ToolResponse.ok(Map.of("ok", true, "runId", runId, "decision", req.decision()));
     }
 

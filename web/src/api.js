@@ -59,6 +59,9 @@ export const api = {
   transfersIncoming: (sku, nodeId) => get(`/api/transfers?sku=${sku}&nodeId=${nodeId}`),
   receiveTransfer: (id) => post(`/api/transfers/${id}/receive`, {}),
 
+  runBatch: () => post('/api/planning/batch', {}),
+  exceptions: () => get('/api/planning/exceptions'),
+
   approvals: () => get('/api/approvals'),
   decideApproval: (id, decision, note) =>
     post(`/api/approvals/${id}/decide`, { decision, note, decidedBy: 'buyer:ana' }),

@@ -9,6 +9,11 @@ import com.rappi.buyer.repo.AgentStepRepo;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 
+import org.springframework.beans.factory.annotation.Qualifier;
+import com.rappi.buyer.tools.ToolResponse;
+
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -33,10 +38,13 @@ public class RunController {
     private final AgentRunRepo runs;
     private final AgentStepRepo steps;
     private final ObjectMapper json;
+    private final RunLock lock;
     private final Clock clock;
 
-    public RunController(AgentRunRepo runs, AgentStepRepo steps, ObjectMapper json, Clock clock) {
+    public RunController(AgentRunRepo runs, AgentStepRepo steps, ObjectMapper json, RunLock lock,
+                         @Qualifier("wallClock") Clock clock) {
         this.runs = runs;
+        this.lock = lock;
         this.steps = steps;
         this.json = json;
         this.clock = clock;
@@ -54,9 +62,27 @@ public class RunController {
                            Integer latencyMs, Integer tokens) {}
 
     @PostMapping("/runs")
-    public Map<String, Object> start(@Valid @RequestBody StartRun req) throws Exception {
+    public ResponseEntity<?> start(@Valid @RequestBody StartRun req) throws Exception {
+        String runId = UUID.randomUUID().toString();
+
+        if (req.sku() != null && req.nodeId() != null) {
+            String holder;
+            try {
+                holder = lock.acquire(req.sku(), req.nodeId(), runId);
+            } catch (RuntimeException e) {
+                // fail closed: a paused agent is better than two runs buying the same thing
+                return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(ToolResponse.error(
+                        "LOCK_UNAVAILABLE", "cannot take the run lock, redis is unreachable: " + e.getMessage()));
+            }
+            if (holder != null) {
+                return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of(
+                        "ok", false, "error", "RUN_IN_PROGRESS", "runId", holder,
+                        "detail", "another run is already working on %s at %s".formatted(req.sku(), req.nodeId())));
+            }
+        }
+
         AgentRun run = new AgentRun();
-        run.setId(UUID.randomUUID().toString());
+        run.setId(runId);
         run.setScenario(req.scenario());
         run.setSku(req.sku());
         run.setNodeId(req.nodeId());
@@ -65,7 +91,7 @@ public class RunController {
         run.setCreatedAt(Instant.now(clock));
         runs.save(run);
 
-        return Map.of("runId", run.getId(), "status", run.getStatus());
+        return ResponseEntity.ok(Map.of("runId", run.getId(), "status", run.getStatus()));
     }
 
     /** The agent's own events. Tool calls trace themselves via the interceptor. */

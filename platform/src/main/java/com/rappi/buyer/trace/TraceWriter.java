@@ -7,6 +7,7 @@ import com.rappi.buyer.repo.AgentStepRepo;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -26,7 +27,8 @@ public class TraceWriter {
     private final ObjectMapper json;
     private final Clock clock;
 
-    public TraceWriter(AgentRunRepo runs, AgentStepRepo steps, ObjectMapper json, Clock clock) {
+    public TraceWriter(AgentRunRepo runs, AgentStepRepo steps, ObjectMapper json,
+                       @Qualifier("wallClock") Clock clock) {
         this.runs = runs;
         this.steps = steps;
         this.json = json;
