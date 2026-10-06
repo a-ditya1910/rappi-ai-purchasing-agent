@@ -14,6 +14,7 @@
       "constraint_verdict_not": ["BLOCKED"],
       "must_mention": [["minimum order", "moq"], ["800"]],
       "must_cite": ["POL-PERISH-02"],
+      "outcome": ["NEEDS_APPROVAL"],
       "max_gather_turns": 4
     },
     "known_failures": {
@@ -99,9 +100,6 @@
       "required_tools": ["/tools/supplier-event", "/tools/supplier-options", "/tools/po"],
       "constraint_verdict_not": ["BLOCKED"],
       "must_cite": ["POL-PARTIAL-01"]
-    },
-    "known_failures": {
-      "cites its sources": "recorded before the citation fix (442b98c). re-record with --live and remove this entry"
     }
   },
   {
