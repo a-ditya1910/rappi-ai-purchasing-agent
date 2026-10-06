@@ -51,7 +51,11 @@ class TransferIT {
         from.setOnHand(from.getOnHand() + t.getQty());
         inventory.save(from);
         Inventory to = inv(TO);
-        to.setInTransit(to.getInTransit() - t.getQty());
+        if (t.getStatus() == TransferOrder.Status.RECEIVED) {
+            to.setOnHand(to.getOnHand() - t.getQty());       // it landed on the shelf
+        } else {
+            to.setInTransit(to.getInTransit() - t.getQty());
+        }
         inventory.save(to);
         t.setStatus(TransferOrder.Status.CANCELLED);
         transferOrders.save(t);
@@ -139,5 +143,21 @@ class TransferIT {
                 approve(run, 188), run);
         assertThat(res.executed()).isFalse();
         assertThat(res.message()).contains("different transfer");
+    }
+
+    @Test
+    @DisplayName("a transfer that lands moves from in transit onto the shelf, once")
+    void receivingLandsTheStock() {
+        String run = run();
+        TransferService.Result res = transfers.create(SKU, FROM, TO, 188, "t-" + UUID.randomUUID(),
+                approve(run, 188), run);
+        madeId = res.transferId();
+        int onHand = inv(TO).getOnHand();
+        int inTransit = inv(TO).getInTransit();
+
+        assertThat(transfers.receive(madeId).executed()).isTrue();
+        assertThat(inv(TO).getOnHand()).isEqualTo(onHand + 188);
+        assertThat(inv(TO).getInTransit()).isEqualTo(inTransit - 188);
+        assertThat(transfers.receive(madeId).executed()).as("twice").isFalse();
     }
 }

@@ -14,6 +14,9 @@ export default function Console({ scenarios, onRun }) {
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
+  const [arrived, setArrived] = useState('')
+  const [receipt, setReceipt] = useState(null)
+  const [reload, setReload] = useState(0)
 
   const s = scenarios[pick]
 
@@ -30,9 +33,35 @@ export default function Console({ scenarios, onRun }) {
       api.openPos(s.sku, s.node).catch(() => []),
       api.budget(s.node, s.category).catch(() => null),
       api.anomaly(s.sku, s.node).catch(() => null),
-    ]).then(([product, inv, fc, pos, budget, anomaly]) =>
-      setSituation({ product, inv, fc, pos, budget, anomaly }))
-  }, [pick])
+      api.transfersIncoming(s.sku, s.node).catch(() => []),
+    ]).then(([product, inv, fc, pos, budget, anomaly, tos]) =>
+      setSituation({ product, inv, fc, pos, budget, anomaly, tos }))
+  }, [pick, reload])
+
+  // a delivery arriving: stock and money move, and the supplier's reliability
+  // learns from what actually turned up
+  async function receive(po) {
+    setReceipt(null)
+    try {
+      const qty = po.qtyConfirmed ?? po.qtyOrdered
+      const r = await api.receivePo(po.poId, qty, arrived)
+      setReceipt(`${po.poId}: ${r.qtyReceived} received ${r.onTime ? 'on time' : 'late'} ` +
+        `(promised ${r.promised}). ${r.supplierId} reliability ${r.reliabilityBefore} → ${r.reliabilityAfter}`)
+      setReload(n => n + 1)
+    } catch (e) {
+      setReceipt(String(e.message || e))
+    }
+  }
+
+  async function receiveTransfer(t) {
+    try {
+      const r = await api.receiveTransfer(t.id)
+      setReceipt(r.message)
+      setReload(n => n + 1)
+    } catch (e) {
+      setReceipt(String(e.message || e))
+    }
+  }
 
   async function run() {
     setBusy(true); setError(null); setResult(null)
@@ -84,9 +113,28 @@ export default function Console({ scenarios, onRun }) {
               <dt>Budget</dt>
               <dd>{situation.budget ? `$${situation.budget.available} of $${situation.budget.allocated}` : '—'}</dd>
               <dt>Open POs</dt>
-              <dd>{situation.pos?.length
-                ? situation.pos.map(p => `${p.poId}: ${p.qtyOrdered} in ${p.daysOut}d`).join(', ')
-                : 'none'}</dd>
+              <dd>{situation.pos?.length ? situation.pos.map(p => (
+                <div key={p.poId}>
+                  {p.poId}: {p.qtyConfirmed ?? p.qtyOrdered} from {p.supplierId} in {p.daysOut}d
+                  <button className="link" onClick={() => receive(p)}>receive</button>
+                </div>
+              )) : 'none'}</dd>
+              {situation.tos?.length > 0 && (
+                <>
+                  <dt>Transfers</dt>
+                  <dd>{situation.tos.map(t => (
+                    <div key={t.id}>
+                      {t.id}: {t.qty} from {t.fromNode}, arrives {t.expectedArrival}
+                      <button className="link" onClick={() => receiveTransfer(t)}>receive</button>
+                    </div>
+                  ))}</dd>
+                </>
+              )}
+              <dt>Arrived on</dt>
+              <dd>
+                <input type="date" value={arrived} onChange={e => setArrived(e.target.value)} />
+                <span className="muted small"> blank = today. a later date makes it late, and the supplier's score drops</span>
+              </dd>
               {situation.anomaly && (
                 <>
                   <dt>Demand</dt>
@@ -101,6 +149,8 @@ export default function Console({ scenarios, onRun }) {
                 </>
               )}
             </dl>
+
+            {receipt && <p className="note">{receipt}</p>}
 
             <label className="rec">
               Recommended quantity

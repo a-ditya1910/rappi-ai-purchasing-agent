@@ -53,6 +53,12 @@ export const api = {
   decide: (body) => post('/agent/decide', body),
   supplierMessage: (body) => post('/agent/supplier-messages', body),
 
+  // the warehouse side - goods arriving at a store
+  receivePo: (id, qtyReceived, receivedDate) =>
+    post(`/api/pos/${id}/receive`, { qtyReceived, receivedDate: receivedDate || null }),
+  transfersIncoming: (sku, nodeId) => get(`/api/transfers?sku=${sku}&nodeId=${nodeId}`),
+  receiveTransfer: (id) => post(`/api/transfers/${id}/receive`, {}),
+
   approvals: () => get('/api/approvals'),
   decideApproval: (id, decision, note) =>
     post(`/api/approvals/${id}/decide`, { decision, note, decidedBy: 'buyer:ana' }),
