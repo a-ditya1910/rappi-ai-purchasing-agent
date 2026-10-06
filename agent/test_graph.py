@@ -230,8 +230,16 @@ def test_preflight_runs_even_when_the_model_is_confident():
     assert platform.validated["recommendedQty"] == 800
 
 
+def covered_plan():
+    """Position already covers the target - nothing needed, nothing to order."""
+    return {"recommendedQty": 0, "rawNeed": 0, "inventoryPosition": 900,
+            "leadTimeDays": 5, "unitPrice": 0.95,
+            "explanationSteps": ["Position already covers the target, nothing to order"],
+            "warnings": []}
+
+
 def test_no_purchase_means_no_validation_call():
-    platform = FakePlatform()
+    platform = FakePlatform(plan=covered_plan())
     out = run(FakeLLM([gathered_everything()], decision("INVESTIGATE", qty=0)), platform)
 
     assert out["validation"]["verdict"] == "NOT_APPLICABLE"
@@ -455,7 +463,8 @@ def test_two_searches_both_survive():
     ])
 
     def kb(query, **f):
-        return {"ok": True, "data": next(hits)}
+        # the third call is analyse's own policy lookup
+        return {"ok": True, "data": next(hits, [])}
 
     llm = FakeLLM([AIMessage(content="", tool_calls=[
         *gathered_everything().tool_calls[:-1],
@@ -504,3 +513,40 @@ def test_a_reject_never_records_a_quantity():
     # the live run said "REJECT 204" - nothing was ordered, but the record lied
     out = run(FakeLLM([gathered_everything()], decision("REJECT", qty=204)), FakePlatform())
     assert out["proposal"]["qty"] == 0
+
+
+# ---- the rules are looked up by code, not left to the model ---------------
+
+def test_policies_are_looked_up_even_if_the_model_never_searches():
+    kb = FakeKB()
+    reads_only = AIMessage(content="", tool_calls=gathered_everything().tool_calls[:-1])
+    llm = FakeLLM([reads_only, AIMessage(content="no thanks")], decision())
+    platform = FakePlatform()
+    run(llm, platform, kb=kb)
+
+    policy_lookups = [q for q, f in kb.queries if f.get("doc_type") == "policy"]
+    assert policy_lookups, "analyse must search the policies itself"
+    assert "minimum order quantity" in policy_lookups[0]   # built from the planner's steps
+    assert "POL-PERISH-02" in llm.prompts_seen[-1]
+    assert any(s["name"] == "policy_lookup" for s in platform.steps)
+
+
+# ---- doing nothing is not silent when the maths shows a need --------------
+
+def test_a_reject_with_a_real_need_goes_to_a_buyer():
+    platform = FakePlatform()          # plan: need 156, legal order 204
+    out = run(FakeLLM([gathered_everything()], decision("REJECT", qty=0)), platform)
+
+    assert out["execution"]["outcome"] == "NEEDS_APPROVAL"
+    assert out["execution"]["guard"] == "declined_despite_need"
+    assert platform.approvals[0]["action"]["qty"] == 204, "the buyer can approve the planner's order"
+    assert "need of 156" in platform.approvals[0]["reason"]
+    assert "/tools/create-po" not in platform.calls
+    assert platform.decisions[0]["decision"] == "REJECT", "the model's own call is still recorded"
+
+
+def test_a_reject_with_nothing_needed_stays_quiet():
+    platform = FakePlatform(plan=covered_plan())
+    out = run(FakeLLM([gathered_everything()], decision("REJECT", qty=0)), platform)
+    assert out["execution"]["outcome"] == "NO_ACTION"
+    assert not platform.approvals

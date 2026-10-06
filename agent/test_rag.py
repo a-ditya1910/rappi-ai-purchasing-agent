@@ -58,11 +58,8 @@ class FakeStore:
         return self.hits
 
 
-def test_no_filter_one_filter_and_several():
+def test_one_filter_and_several():
     s = FakeStore()
-    rag.search("q", store=s)
-    assert s.filter is None
-
     rag.search("q", doc_type="policy", store=s)
     assert s.filter == {"doc_type": {"$eq": "policy"}}
 
@@ -70,6 +67,16 @@ def test_no_filter_one_filter_and_several():
     rag.search("q", doc_type="decision", sku="SKU-MILK-1L", store=s)
     assert s.filter == {"$and": [{"doc_type": {"$eq": "decision"}},
                                  {"sku": {"$eq": "SKU-MILK-1L"}}]}
+
+
+def test_past_decisions_only_come_back_when_asked_for():
+    s = FakeStore()
+    rag.search("q", store=s)
+    assert s.filter == {"doc_type": {"$ne": "decision"}}
+
+    rag.search("q", sku="SKU-MILK-1L", store=s)
+    assert s.filter == {"$and": [{"sku": {"$eq": "SKU-MILK-1L"}},
+                                 {"doc_type": {"$ne": "decision"}}]}
 
 
 def test_results_are_tagged_as_reference_text_with_a_similarity():

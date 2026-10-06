@@ -40,6 +40,14 @@ REQUIRED = {
 
 MAX_RETRIEVED = 8
 
+# what each scenario is about, so the policy lookup has something to match on
+# beyond the planner's numbers
+SITUATION = {
+    "S1_REVIEW": "Reviewing a purchase recommendation before ordering.",
+    "S2_PARTIAL": "A supplier confirmed less than was ordered.",
+    "S3_DEMAND": "Actual sales have moved away from the forecast.",
+}
+
 
 class State(TypedDict, total=False):
     run_id: str
@@ -138,7 +146,29 @@ def build(platform, llm, kb=None):
         if rec:
             delta = (plan["recommendedQty"] - rec) / rec * 100
             state["analysis"]["deltaVsRecommendationPct"] = round(delta, 1)
+
+        _lookup_policies(state, plan)
         return state
+
+    def _lookup_policies(state, plan):
+        # the rules that apply are looked up by code, not left to the model. a live
+        # run searched without the policy filter and never saw the rule it then
+        # misquoted. the model's own search_knowledge is still there for extra context
+        query = " ".join([SITUATION.get(state["scenario"], ""),
+                          *plan.get("explanationSteps", []), *plan.get("warnings", [])])
+        out = kb(query, doc_type="policy", k=3)
+        hits = out.get("data") or []
+        kept = state.setdefault("retrieved", [])
+        for h in hits:
+            if h["text"] not in kept:
+                kept.insert(0, h["text"])     # rules first, ahead of anything else
+        try:
+            platform.log_step("RETRIEVAL", "policy_lookup", {
+                "query": query[:300], "filters": {"doc_type": "policy"},
+                "hits": [{"ref": h["ref"], "similarity": h["similarity"]} for h in hits],
+                "error": out.get("error")})
+        except Exception as e:
+            log.warning("could not trace the policy lookup: %s", e)
 
     def propose(state):
         plan = state.get("analysis") or {}
@@ -200,6 +230,33 @@ def build(platform, llm, kb=None):
         v = state.get("validation") or {}
         sit = state["situation"]
         qty = p.get("qty") or 0
+
+        # the model may decide to order nothing, but not silently when the maths says
+        # the store will run short. a wrong "do nothing" empties a shelf just as
+        # surely as a wrong order overfills one, so a buyer gets to confirm it
+        need, legal = plan.get("rawNeed") or 0, plan.get("recommendedQty") or 0
+        if p.get("decision") in ("REJECT", "INVESTIGATE") and need > 0 and legal > 0:
+            action = {
+                "sku": sit["sku"], "nodeId": sit["node_id"],
+                "supplierId": sit["supplier_id"], "qty": legal,
+                "unitPrice": plan.get("unitPrice"),
+                "expectedDelivery": _delivery_date(plan),
+                "recommendedQty": sit.get("recommended_qty"),
+                "decision": "MODIFY",
+                "reason": "planner order, sent to a buyer because the agent declined it",
+            }
+            platform.request_approval(
+                reason=("agent chose %s, but the planner shows a need of %d and a legal "
+                        "order of %d. buyer to confirm doing nothing, or approve the order. "
+                        "agent's reasoning: %s") % (p.get("decision"), need, legal,
+                                                     (p.get("reasoning") or "")[:400]),
+                riskTier="T3", proposedAction=action)
+            platform.record_decision(
+                decision=p.get("decision"), finalQty=0,
+                explanation=_explain(p), validationReport=v, **_stats(llm, state))
+            state["execution"] = {"outcome": "NEEDS_APPROVAL", "action": action,
+                                  "guard": "declined_despite_need"}
+            return state
 
         if v.get("verdict") == "NOT_APPLICABLE" or qty <= 0:
             platform.record_decision(

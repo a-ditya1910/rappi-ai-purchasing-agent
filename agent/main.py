@@ -38,12 +38,15 @@ def tracer(platform):
     return on_call
 
 
-def remember_run(run_id, sku, node, supplier, rec, decision, qty, outcome, why):
+def remember_run(run_id, sku, node, supplier, rec, decision, qty, outcome, why, reviewed=False):
+    # say plainly whether anyone checked it. an unreviewed decision read back
+    # later is the agent's opinion, not something that is known to be right
+    status = "reviewed by a buyer" if reviewed else "unreviewed agent decision"
     rag.remember(
         f"run:{run_id}",
-        f"Decision for {sku} at {node}: recommended {rec}, decided {decision} {qty} units "
-        f"from {supplier}. Outcome: {outcome}. Reasoning: {(why or '')[:600]}",
-        sku=sku, node_id=node, supplier_id=supplier)
+        f"Decision for {sku} at {node} ({status}): recommended {rec}, decided {decision} "
+        f"{qty} units from {supplier}. Outcome: {outcome}. Reasoning: {(why or '')[:600]}",
+        sku=sku, node_id=node, supplier_id=supplier, reviewed=reviewed)
 
 
 @app.on_event("startup")
@@ -120,7 +123,8 @@ def resume(run_id: str, req: ResumeRequest):
     # same ref as the original run, so this overwrites "waiting for approval"
     remember_run(run_id, action["sku"], action["nodeId"], action["supplierId"],
                  action.get("recommendedQty"), action.get("decision"), action.get("qty"),
-                 "approved by a buyer, then " + str(result.get("outcome")), action.get("reason"))
+                 "approved by a buyer, then " + str(result.get("outcome")), action.get("reason"),
+                 reviewed=True)
 
     return {
         "runId": run_id,

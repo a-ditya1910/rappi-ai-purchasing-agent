@@ -127,7 +127,12 @@ def _ensure_index():
 def search(query, doc_type=None, sku=None, supplier_id=None, k=4, store=None):
     conds = [{f: {"$eq": v}} for f, v in
              (("doc_type", doc_type), ("sku", sku), ("supplier_id", supplier_id)) if v]
-    filt = None if not conds else conds[0] if len(conds) == 1 else {"$and": conds}
+    if not doc_type:
+        # past decisions only come back when asked for by name. a live run once
+        # pulled up its own earlier wrong answer from an unfiltered search and
+        # cited it as evidence - memory is history, not reference material
+        conds.append({"doc_type": {"$ne": "decision"}})
+    filt = conds[0] if len(conds) == 1 else {"$and": conds}
     try:
         hits = (store or get_store()).similarity_search_with_score(query, k=k, filter=filt)
     except Exception as e:
