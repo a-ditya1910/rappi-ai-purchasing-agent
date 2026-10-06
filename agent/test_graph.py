@@ -510,7 +510,12 @@ def test_citations_end_up_in_the_recorded_explanation():
         "reasoning": "moq forces a small over-buy", "key_factors": [],
         "citations": ["POL-PERISH-02", "SUP-LACTEO"]})
     platform = FakePlatform()
-    out = run(FakeLLM([gathered_everything()], cited), platform)
+    kb = FakeKB([
+        {"ref": "POL-PERISH-02", "type": "policy", "similarity": 0.8,
+         "text": '<retrieved_doc ref="POL-PERISH-02">perish</retrieved_doc>'},
+        {"ref": "SUP-LACTEO", "type": "supplier", "similarity": 0.7,
+         "text": '<retrieved_doc ref="SUP-LACTEO">lacteo</retrieved_doc>'}])
+    out = run(FakeLLM([gathered_everything()], cited), platform, kb=kb)
 
     assert out["proposal"]["citations"] == ["POL-PERISH-02", "SUP-LACTEO"]
     assert platform.decisions[0]["explanation"].endswith("Sources: POL-PERISH-02, SUP-LACTEO")
@@ -690,3 +695,24 @@ def test_the_extraction_prompt_knows_today():
     llm = Seen()
     inbox.extract(llm, "SUP-ANDINA", "", "arrives 14 March")
     assert "Today is 2026-03-10" in llm.prompt
+
+
+# ---- citations are only ever what the agent was given ----------------------
+
+def test_a_policy_named_in_the_reasoning_becomes_a_citation():
+    # live: the model wrote "Per POL-PERISH-02 ..." but left citations empty
+    named = tool_call("record_decision", {
+        "decision": "MODIFY", "qty": 204, "confidence": 0.8, "key_factors": [],
+        "reasoning": "Per POL-PERISH-02 a small over-buy is acceptable with approval."})
+    out = run(FakeLLM([gathered_everything()], named), FakePlatform())
+    assert out["proposal"]["citations"] == ["POL-PERISH-02"]
+
+
+def test_a_citation_that_was_never_retrieved_is_dropped():
+    made_up = tool_call("record_decision", {
+        "decision": "MODIFY", "qty": 204, "confidence": 0.8, "key_factors": [],
+        "reasoning": "fine", "citations": ["POL-PERISH-02", "POL-DOES-NOT-EXIST"]})
+    out = run(FakeLLM([gathered_everything()], made_up), FakePlatform())
+
+    assert out["proposal"]["citations"] == ["POL-PERISH-02"]
+    assert any("POL-DOES-NOT-EXIST" in e for e in out["errors"])

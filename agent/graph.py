@@ -14,6 +14,7 @@ written gets read back and checked, and a mismatch goes to the repair loop in
 execute.py.
 """
 import json
+import re
 import logging
 import time
 
@@ -212,6 +213,7 @@ def build(platform, llm, kb=None):
 
         res = llm.invoke(msgs, tools=[_decision_tool()], label="propose")
         state["proposal"] = _extract_decision(res, plan)
+        _check_citations(state)
         return state
 
     def preflight(state):
@@ -514,6 +516,30 @@ def _extract_decision(res, plan):
     return {"decision": "INVESTIGATE",
             "reasoning": getattr(res, "content", "") or "no structured decision returned",
             "key_factors": [], "confidence": 0.0, "qty": 0}
+
+
+def _check_citations(state):
+    """Citations are only ever refs the agent was actually given.
+
+    A cited ref that was never retrieved is dropped and noted - that is the model
+    claiming a source it did not see. And when the model names a document in its
+    reasoning but leaves the field empty (a live run did exactly that with
+    POL-PARTIAL-01), the field is filled from what it named, still only from
+    what it was given."""
+    p = state.get("proposal") or {}
+    given = list(dict.fromkeys(re.findall(r'<retrieved_doc ref="([^"]+)">',
+                                          "\n".join(state.get("retrieved") or []))))
+    cited = [c for c in p.get("citations") or [] if isinstance(c, str)]
+
+    unknown = [c for c in cited if c not in given]
+    if unknown:
+        state["errors"].append("dropped citations that were never retrieved: " + ", ".join(unknown))
+    cited = [c for c in cited if c in given]
+
+    if not cited:
+        why = p.get("reasoning") or ""
+        cited = [g for g in given if g in why]
+    p["citations"] = cited
 
 
 def _apply_supplier_choice(state):
