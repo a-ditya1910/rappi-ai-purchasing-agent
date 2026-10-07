@@ -56,6 +56,9 @@ export const api = {
   // the warehouse side - goods arriving at a store
   receivePo: (id, qtyReceived, receivedDate) =>
     post(`/api/pos/${id}/receive`, { qtyReceived, receivedDate: receivedDate || null }),
+  cancelPo: (id) => post(`/api/pos/${id}/cancel`, {}),
+  // stands in for the till: sold stock leaves the shelf, so the position drops
+  sell: (sku, nodeId, qty) => post('/api/inventory/sell', { sku, nodeId, qty }),
   transfersIncoming: (sku, nodeId) => get(`/api/transfers?sku=${sku}&nodeId=${nodeId}`),
   receiveTransfer: (id) => post(`/api/transfers/${id}/receive`, {}),
 
@@ -98,6 +101,12 @@ export const SCENARIOS = [
     supplier: 'SUP-ARROZMX', category: 'grocery', recommended: 1200,
     label: 'No legal order exists',
     note: 'Needs 713, affords 140, supplier minimum is 1000. The answer is a brief for a human.',
+  },
+  {
+    id: 'S1_REVIEW', sku: 'SKU-COFFEE-500G', node: 'NODE-BOG-01',
+    supplier: 'SUP-ANDINA', category: 'beverages', recommended: 800,
+    label: 'Coffee, long shelf life',
+    note: 'Same review as milk, but a year of shelf life, so no spoilage rule to fall back on.',
   },
 ]
 

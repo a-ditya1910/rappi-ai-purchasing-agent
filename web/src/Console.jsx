@@ -7,7 +7,7 @@ import { api } from './api.js'
  * The recommended quantity is editable on purpose. Typing 50000 and watching
  * the agent refuse it says more about the system than any amount of prose.
  */
-export default function Console({ scenarios, onRun }) {
+export default function Console({ scenarios, onRun, active }) {
   const [pick, setPick] = useState(0)
   const [recommended, setRecommended] = useState(scenarios[0].recommended ?? '')
   const [situation, setSituation] = useState(null)
@@ -17,6 +17,7 @@ export default function Console({ scenarios, onRun }) {
   const [arrived, setArrived] = useState('')
   const [receipt, setReceipt] = useState(null)
   const [reload, setReload] = useState(0)
+  const [sold, setSold] = useState('')
 
   const s = scenarios[pick]
 
@@ -24,6 +25,12 @@ export default function Console({ scenarios, onRun }) {
     setRecommended(s.recommended ?? '')
     setResult(null)
     setError(null)
+    setReceipt(null)
+  }, [pick])
+
+  // also reloads on coming back to the tab - an approval may have moved stock
+  useEffect(() => {
+    if (!active) return
     setSituation(null)
 
     Promise.all([
@@ -36,7 +43,7 @@ export default function Console({ scenarios, onRun }) {
       api.transfersIncoming(s.sku, s.node).catch(() => []),
     ]).then(([product, inv, fc, pos, budget, anomaly, tos]) =>
       setSituation({ product, inv, fc, pos, budget, anomaly, tos }))
-  }, [pick, reload])
+  }, [pick, reload, active])
 
   // a delivery arriving: stock and money move, and the supplier's reliability
   // learns from what actually turned up
@@ -47,6 +54,28 @@ export default function Console({ scenarios, onRun }) {
       const r = await api.receivePo(po.poId, qty, arrived)
       setReceipt(`${po.poId}: ${r.qtyReceived} received ${r.onTime ? 'on time' : 'late'} ` +
         `(promised ${r.promised}). ${r.supplierId} reliability ${r.reliabilityBefore} → ${r.reliabilityAfter}`)
+      setReload(n => n + 1)
+    } catch (e) {
+      setReceipt(String(e.message || e))
+    }
+  }
+
+  async function cancel(po) {
+    try {
+      const r = await api.cancelPo(po.poId)
+      setReceipt(`${r.message}. Its quantity and budget are released.`)
+      setReload(n => n + 1)
+    } catch (e) {
+      setReceipt(String(e.message || e))
+    }
+  }
+
+  async function sell() {
+    if (!sold) return
+    try {
+      const r = await api.sell(s.sku, s.node, Number(sold))
+      setReceipt(`Sold ${r.sold}. ${r.onHand} left on hand.`)
+      setSold('')
       setReload(n => n + 1)
     } catch (e) {
       setReceipt(String(e.message || e))
@@ -107,6 +136,13 @@ export default function Console({ scenarios, onRun }) {
                     − {situation.inv.reserved} reserved
                     + {situation.inv.inTransit} in transit</span>}
               </dd>
+              <dt>Sold</dt>
+              <dd>
+                <input className="qty" value={sold} placeholder="qty"
+                       onChange={e => setSold(e.target.value.replace(/[^0-9]/g, ''))} />
+                <button className="link" onClick={sell}>record sale</button>
+                <span className="muted small"> stands in for the till. lowers the position</span>
+              </dd>
               <dt>Forecast</dt>
               <dd>{situation.fc ? `${situation.fc.meanPerDay}/day` : '—'}
                 {situation.fc?.isStale && <span className="tag warn">stale</span>}</dd>
@@ -117,6 +153,7 @@ export default function Console({ scenarios, onRun }) {
                 <div key={p.poId}>
                   {p.poId}: {p.qtyConfirmed ?? p.qtyOrdered} from {p.supplierId} in {p.daysOut}d
                   <button className="link" onClick={() => receive(p)}>receive</button>
+                  <button className="link" onClick={() => cancel(p)}>cancel</button>
                 </div>
               )) : 'none'}</dd>
               {situation.tos?.length > 0 && (
