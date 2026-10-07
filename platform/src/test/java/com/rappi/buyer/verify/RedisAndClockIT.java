@@ -90,6 +90,36 @@ class RedisAndClockIT {
     }
 
     @Test
+    @DisplayName("a run that dies ends FAILED with its error and frees the sku at once")
+    @SuppressWarnings("unchecked")
+    void crashedRunFails() throws Exception {
+        String sku = "SKU-LOCK-" + UUID.randomUUID().toString().substring(0, 8);
+        String run = start(sku);
+
+        runController.saveResult(run, new RunController.Result(null, "gemini 503 after 3 attempts"));
+
+        Map<String, Object> got = (Map<String, Object>) runController.get(run).getBody();
+        assertThat(got.get("status").toString()).isEqualTo("FAILED");
+        assertThat(got.get("error")).isEqualTo("gemini 503 after 3 attempts");
+        assertThat(start(sku)).as("not blocked until the lock expires").isNotNull();
+    }
+
+    @Test
+    @DisplayName("a finished run's answer is stored and read back with it")
+    @SuppressWarnings("unchecked")
+    void resultIsStored() throws Exception {
+        String sku = "SKU-LOCK-" + UUID.randomUUID().toString().substring(0, 8);
+        String run = start(sku);
+        decide(run);
+
+        runController.saveResult(run, new RunController.Result(Map.of("decision", "REJECT", "qty", 0), null));
+
+        Map<String, Object> got = (Map<String, Object>) runController.get(run).getBody();
+        assertThat(got.get("status").toString()).isEqualTo("COMPLETED");
+        assertThat(got.get("result").toString()).contains("REJECT");
+    }
+
+    @Test
     @DisplayName("a run parked on a buyer does not keep the sku locked")
     void parkedRunReleases() throws Exception {
         String sku = "SKU-LOCK-" + UUID.randomUUID().toString().substring(0, 8);

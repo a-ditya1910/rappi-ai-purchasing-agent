@@ -163,6 +163,13 @@ class Platform:
 
     # ---- run bookkeeping -------------------------------------------------
 
+    def save_result(self, result=None, error=None):
+        """The end of a background run: the full answer, or why it died. An error
+        makes the platform mark the run FAILED and free its lock."""
+        r = self.http.put(f"{self.base}/runs/{self.run_id}/result",
+                          json={"result": result, "error": error}, headers=self._headers())
+        return self._unwrap(f"/runs/{self.run_id}/result", r)
+
     def log_step(self, type_, name, payload=None, latencyMs=None, tokens=None):
         """Agent side events - the model's own reasoning. Tool calls trace
         themselves through the interceptor."""

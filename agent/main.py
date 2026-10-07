@@ -59,7 +59,9 @@ def startup():
         return
     try:
         ok, want, available = llm_mod.check_model_available()
-        if ok:
+        if ok and available:
+            log.warning("gemini model %s is reachable but %s", want, available[0])
+        elif ok:
             log.info("gemini model %s is available", want)
         else:
             flash = [m for m in available if "flash" in m][:6]
@@ -161,11 +163,20 @@ def resume(run_id: str, req: ResumeRequest):
 def decide(req: DecideRequest):
     started = time.time()
     platform = Platform(req.run_id)
-    model = llm_mod.Gemini(on_call=tracer(platform))
-    return run_graph(platform, model, req.run_id, req.scenario, {
-        "sku": req.sku, "node_id": req.node_id, "supplier_id": req.supplier_id,
-        "recommended_qty": req.recommended_qty, "po_id": req.po_id,
-    }, started)
+    try:
+        model = llm_mod.Gemini(on_call=tracer(platform))
+        return run_graph(platform, model, req.run_id, req.scenario, {
+            "sku": req.sku, "node_id": req.node_id, "supplier_id": req.supplier_id,
+            "recommended_qty": req.recommended_qty, "po_id": req.po_id,
+        }, started)
+    except Exception as e:
+        # without this a crash left the run RUNNING forever and its sku locked
+        log.exception("run %s failed", req.run_id)
+        try:
+            platform.save_result(error=f"{type(e).__name__}: {e}"[:2000])
+        except Exception:
+            log.exception("could not record that run %s failed", req.run_id)
+        raise
 
 
 def run_graph(platform, model, run_id, scenario, situation, started):
