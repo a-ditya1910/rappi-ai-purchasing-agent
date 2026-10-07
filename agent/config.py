@@ -13,6 +13,9 @@ class Config:
     # lineup moves. check your ai studio dashboard.
     model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
     judge_model = os.getenv("GEMINI_JUDGE_MODEL", "gemini-3.1-flash-lite")
+    # tried when the main model keeps answering "busy". a different model has its own
+    # capacity, so it is often fine while the main one is overloaded. empty = none
+    fallback_model = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-flash-lite-latest")
     rpm_limit = int(os.getenv("GEMINI_RPM_LIMIT", "14"))
     embed_model = os.getenv("GEMINI_EMBED_MODEL", "gemini-embedding-001")
 

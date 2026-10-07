@@ -44,7 +44,10 @@ export default function App() {
         </nav>
       </header>
 
-      {tab === 'console' && <Console scenarios={SCENARIOS} onRun={show} />}
+      {/* kept mounted so the pick, the quantity and the last result survive a tab switch */}
+      <div hidden={tab !== 'console'}>
+        <Console scenarios={SCENARIOS} onRun={show} active={tab === 'console'} />
+      </div>
       {tab === 'approvals' && <Approvals onOpen={show} />}
       {tab === 'inbox' && <Inbox onOpen={show} />}
       {tab === 'batch' && <Batch onOpen={show} />}

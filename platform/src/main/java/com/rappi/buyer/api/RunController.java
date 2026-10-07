@@ -17,6 +17,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -111,9 +112,37 @@ public class RunController {
         return Map.of("ok", true, "seq", step.getSeq());
     }
 
+    public record Result(Object result, String error) {}
+
+    /**
+     * The end of a background run. A result is stored for the console to read; an
+     * error marks the run FAILED and frees its lock, so a crashed run neither shows
+     * as RUNNING forever nor blocks the sku until the lock expires.
+     */
+    @PutMapping("/runs/{runId}/result")
+    public ResponseEntity<?> saveResult(@PathVariable String runId, @RequestBody Result req) throws Exception {
+        AgentRun run = runs.findById(runId).orElse(null);
+        if (run == null) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(ToolResponse.error("NO_RUN", runId));
+        }
+        if (req.result() != null) {
+            run.setResult(json.writeValueAsString(req.result()));
+        }
+        if (req.error() != null) {
+            run.setError(req.error());
+            run.setStatus(AgentRun.Status.FAILED);
+            lock.release(run.getSku(), run.getNodeId(), runId);
+        }
+        runs.save(run);
+        return ResponseEntity.ok(Map.of("ok", true, "status", run.getStatus()));
+    }
+
     @GetMapping("/runs/{runId}")
-    public Map<String, Object> get(@PathVariable String runId) {
-        AgentRun run = runs.findById(runId).orElseThrow();
+    public ResponseEntity<Map<String, Object>> get(@PathVariable String runId) throws Exception {
+        AgentRun run = runs.findById(runId).orElse(null);
+        if (run == null) {
+            return ResponseEntity.notFound().build();
+        }
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("runId", run.getId());
         out.put("scenario", run.getScenario());
@@ -126,6 +155,8 @@ public class RunController {
         out.put("tokensIn", run.getTokensIn());
         out.put("tokensOut", run.getTokensOut());
         out.put("durationMs", run.getDurationMs());
+        out.put("result", run.getResult() == null ? null : json.readTree(run.getResult()));
+        out.put("error", run.getError());
         out.put("steps", steps.findByRunIdOrderBySeq(runId).stream().map(s -> {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("seq", s.getSeq());
@@ -136,7 +167,7 @@ public class RunController {
             m.put("payload", s.getPayload());
             return m;
         }).toList());
-        return out;
+        return ResponseEntity.ok(out);
     }
 
     @GetMapping("/runs")

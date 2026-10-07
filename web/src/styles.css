@@ -114,6 +114,7 @@ ul.runs li.on { background: #eef2ff; }
 
 .rec { display: block; font-size: 12px; color: #6b7280; margin-top: 14px; }
 .rec input { margin-top: 4px; }
+input.qty { width: 80px; padding: 4px 7px; }
 
 .outcome { margin-top: 12px; padding-top: 12px; border-top: 1px solid #eceef0; }
 .meta { margin-top: 16px; padding-top: 10px; border-top: 1px solid #eceef0;

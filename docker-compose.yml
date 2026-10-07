@@ -75,6 +75,7 @@ services:
     environment:
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.1-flash-lite}
+      GEMINI_FALLBACK_MODEL: ${GEMINI_FALLBACK_MODEL:-gemini-flash-lite-latest}
       GEMINI_EMBED_MODEL: ${GEMINI_EMBED_MODEL:-gemini-embedding-001}
       GEMINI_RPM_LIMIT: ${GEMINI_RPM_LIMIT:-14}
       PLATFORM_BASE_URL: http://platform:8080

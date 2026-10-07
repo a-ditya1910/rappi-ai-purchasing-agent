@@ -816,3 +816,73 @@ def test_a_transfer_is_recorded_as_escalate_whatever_the_model_called_it():
     run(FakeLLM([gathered_everything()], accept), platform)
     assert platform.decisions[0]["decision"] == "ESCALATE"
     assert platform.approvals[0]["action"]["decision"] == "ESCALATE"
+
+
+# ---- background runs -------------------------------------------------------
+
+def test_a_run_that_crashes_is_reported_failed_not_left_running(monkeypatch):
+    import main
+
+    saved = []
+
+    class P:
+        def __init__(self, run_id):
+            self.run_id = run_id
+
+        def save_result(self, result=None, error=None):
+            saved.append({"result": result, "error": error})
+
+    def boom(*a, **kw):
+        raise RuntimeError("503 UNAVAILABLE after 3 attempts")
+
+    monkeypatch.setattr(main, "Platform", P)
+    monkeypatch.setattr(main.llm_mod, "Gemini", lambda **kw: None)
+    monkeypatch.setattr(main, "run_graph", boom)
+
+    import pytest
+    with pytest.raises(RuntimeError):
+        main.decide(main.DecideRequest(run_id="r1", scenario="S1_REVIEW"))
+
+    assert saved == [{"result": None, "error": "RuntimeError: 503 UNAVAILABLE after 3 attempts"}]
+
+
+def test_a_read_timeout_is_retried():
+    import httpx
+    import llm as llm_mod
+    # says "timed out", not "timeout" - only the type name gives it away
+    assert llm_mod._retryable(httpx.ReadTimeout("The read operation timed out"))
+
+
+def test_a_gemini_deadline_is_retried():
+    import llm as llm_mod
+    e = RuntimeError("504 DEADLINE_EXCEEDED. Deadline expired before operation could complete.")
+    assert llm_mod._retryable(e)
+
+
+def test_a_busy_model_falls_back_to_the_second_one(monkeypatch):
+    import llm as llm_mod
+
+    class NoLimit:
+        def acquire(self):
+            pass
+
+    class Busy:
+        tries = 0
+
+        def invoke(self, messages):
+            Busy.tries += 1
+            raise RuntimeError("503 UNAVAILABLE. This model is currently experiencing high demand")
+
+    class Fine:
+        def invoke(self, messages):
+            return AIMessage(content="ok", usage_metadata={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2})
+
+    monkeypatch.setattr(type(llm_mod.cfg), "gemini_key", "test-key")
+    monkeypatch.setattr(llm_mod.time, "sleep", lambda s: None)
+    seen = []
+    g = llm_mod.Gemini(model="main-model", limiter=NoLimit(), on_call=lambda **kw: seen.append(kw))
+    g._chat, g._fallback, g.fallback_name = Busy(), Fine(), "backup-model"
+
+    assert g.invoke(["hi"]).content == "ok"
+    assert Busy.tries == llm_mod.ATTEMPTS
+    assert seen[0]["model"] == "backup-model", "the trace says which model actually answered"

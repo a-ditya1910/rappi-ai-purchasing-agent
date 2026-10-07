@@ -52,6 +52,14 @@ public class AgentRun {
     @JdbcTypeCode(SqlTypes.JSON)
     private String validationReport;
 
+    /** The agent's full answer, saved when a background run finishes. */
+    @JdbcTypeCode(SqlTypes.JSON)
+    private String result;
+
+    /** Why the run died, when it did. */
+    @Column(columnDefinition = "text")
+    private String error;
+
     private int tokensIn;
     private int tokensOut;
     private int llmCalls;
